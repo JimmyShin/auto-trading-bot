@@ -1,0 +1,3 @@
+# Optional dependencies for the MCP server used by mcp_server.py
+mcp
+

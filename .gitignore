@@ -1,0 +1,19 @@
+# Environment
+.env
+.env.local
+
+# Sensitive/runtime files
+state.json
+data/
+bot.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
+
+# Misc
+.DS_Store
