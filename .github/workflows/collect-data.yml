@@ -16,17 +16,21 @@ jobs:
           key: ${{ secrets.DEPLOY_KEY }}
           script: |
             SNAP=/tmp/auto-bot-data.tar.gz
-            rm -f $SNAP
-            tar czf $SNAP -C /opt/auto-trading-bot data state.json
+            rm -f "$SNAP"
+            tar czf "$SNAP" -C /opt/auto-trading-bot data state.json
 
-      - name: Download archive
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_KEY }}
-          source: /tmp/auto-bot-data.tar.gz
-          target: ./snapshot
+      - name: Prepare SSH key for download
+        shell: bash
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: Download archive via scp
+        shell: bash
+        run: |
+          mkdir -p snapshot
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/tmp/auto-bot-data.tar.gz snapshot/auto-bot-data.tar.gz
 
       - name: Clean up remote snapshot
         if: always()
