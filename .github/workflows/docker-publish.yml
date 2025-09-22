@@ -31,3 +31,15 @@ jobs:
         run: |
           docker tag ghcr.io/$REGISTRY_USER/auto-trading-bot:${{ github.sha }} ghcr.io/$REGISTRY_USER/auto-trading-bot:latest
           docker push ghcr.io/$REGISTRY_USER/auto-trading-bot:latest
+
+      - name: Deploy to droplet
+        if: github.ref == 'refs/heads/main'
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          script: |
+            cd /opt/auto-trading-bot
+            docker-compose pull
+            docker-compose up -d
