@@ -8,13 +8,15 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      REGISTRY_USER: ${{ toLower(secrets.GHCR_USER) }}
-      REGISTRY_TOKEN: ${{ secrets.GHCR_TOKEN }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Prepare registry credentials
+        run: |
+          echo "REGISTRY_USER=$(echo '${{ secrets.GHCR_USER }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+          echo "REGISTRY_TOKEN=${{ secrets.GHCR_TOKEN }}" >> $GITHUB_ENV
 
       - name: Log in to GHCR
         run: echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
