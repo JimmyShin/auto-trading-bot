@@ -1,0 +1,44 @@
+name: Collect Data Snapshot
+
+on:
+  workflow_dispatch:
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create archive on droplet
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          script: |
+            SNAP=/tmp/auto-bot-data.tar.gz
+            rm -f $SNAP
+            tar czf $SNAP -C /opt/auto-trading-bot data state.json
+
+      - name: Download archive
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          source: /tmp/auto-bot-data.tar.gz
+          target: ./snapshot
+
+      - name: Clean up remote snapshot
+        if: always()
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          script: rm -f /tmp/auto-bot-data.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto-trading-bot-data
+          path: snapshot/auto-bot-data.tar.gz
