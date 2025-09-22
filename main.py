@@ -51,35 +51,113 @@ def _now_str(fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
 
 def log_trade(symbol: str, side: str, entry_price: float, qty: float, reason: str = "signal"):
     try:
+        import csv
+
         ts = _now_str()
         date = _now_str("%Y-%m-%d")
         base = _data_base_dir()
         fn = os.path.join(base, f"trades_{date}.csv")
         exists = os.path.exists(fn)
+        fieldnames = [
+            'timestamp', 'symbol', 'side', 'entry_price', 'qty', 'reason', 'status',
+            'exit_timestamp', 'exit_price', 'pnl_pct', 'exit_reason'
+        ]
+
+        row = {
+            'timestamp': ts,
+            'symbol': symbol,
+            'side': side,
+            'entry_price': entry_price,
+            'qty': qty,
+            'reason': reason,
+            'status': 'OPEN',
+            'exit_timestamp': '',
+            'exit_price': '',
+            'pnl_pct': '',
+            'exit_reason': ''
+        }
+
+        write_header = not exists or os.path.getsize(fn) == 0
         with open(fn, 'a', encoding='utf-8', newline='') as f:
-            import csv
-            w = csv.writer(f)
-            if not exists:
-                w.writerow(['timestamp', 'symbol', 'side', 'entry_price', 'qty', 'reason', 'status'])
-            w.writerow([ts, symbol, side, entry_price, qty, reason, 'OPEN'])
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
     except Exception as e:
         print(f"[WARN] trade log failed: {e}")
 
 
 def log_exit(symbol: str, side: str, exit_price: float, pnl_pct: float, reason: str = "exit"):
     try:
+        import csv
+
         ts = _now_str()
         date = _now_str("%Y-%m-%d")
         base = _data_base_dir()
         fn = os.path.join(base, f"trades_{date}.csv")
-        exists = os.path.exists(fn)
-        with open(fn, 'a', encoding='utf-8', newline='') as f:
-            import csv
-            w = csv.writer(f)
-            if not exists:
-                w.writerow(['timestamp', 'symbol', 'side', 'entry_price', 'qty', 'reason', 'status'])
-            side_norm = (side or '').lower()
-            w.writerow([ts, symbol, f"{side_norm}_EXIT", exit_price, pnl_pct, reason, 'CLOSED'])
+        fieldnames = [
+            'timestamp', 'symbol', 'side', 'entry_price', 'qty', 'reason', 'status',
+            'exit_timestamp', 'exit_price', 'pnl_pct', 'exit_reason'
+        ]
+
+        if not os.path.exists(fn):
+            with open(fn, 'w', encoding='utf-8', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerow({
+                    'timestamp': ts,
+                    'symbol': symbol,
+                    'side': side,
+                    'entry_price': '',
+                    'qty': '',
+                    'reason': '',
+                    'status': 'CLOSED',
+                    'exit_timestamp': ts,
+                    'exit_price': exit_price,
+                    'pnl_pct': pnl_pct,
+                    'exit_reason': reason
+                })
+            return
+
+        rows = []
+        with open(fn, 'r', encoding='utf-8', newline='') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                for fld in fieldnames:
+                    row.setdefault(fld, '')
+                rows.append(row)
+
+        found = False
+        for row in reversed(rows):
+            if row.get('symbol') == symbol and row.get('status', '').upper() == 'OPEN':
+                row['status'] = 'CLOSED'
+                row['exit_timestamp'] = ts
+                row['exit_price'] = exit_price
+                row['pnl_pct'] = pnl_pct
+                row['exit_reason'] = reason
+                found = True
+                break
+
+        if not found:
+            rows.append({
+                'timestamp': ts,
+                'symbol': symbol,
+                'side': side,
+                'entry_price': '',
+                'qty': '',
+                'reason': '',
+                'status': 'CLOSED',
+                'exit_timestamp': ts,
+                'exit_price': exit_price,
+                'pnl_pct': pnl_pct,
+                'exit_reason': reason
+            })
+
+        with open(fn, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({fld: row.get(fld, '') for fld in fieldnames})
     except Exception as e:
         print(f"[WARN] exit log failed: {e}")
 
