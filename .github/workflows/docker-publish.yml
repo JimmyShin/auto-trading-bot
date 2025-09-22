@@ -8,21 +8,24 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      REGISTRY_USER: ${{ toLower(secrets.GHCR_USER) }}
+      REGISTRY_TOKEN: ${{ secrets.GHCR_TOKEN }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Log in to GHCR
-        run: echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ secrets.GHCR_USER }} --password-stdin
+        run: echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
 
       - name: Build image
-        run: docker build -t ghcr.io/${{ secrets.GHCR_USER }}/auto-trading-bot:${{ github.sha }} .
+        run: docker build -t ghcr.io/$REGISTRY_USER/auto-trading-bot:${{ github.sha }} .
 
       - name: Push image with commit tag
-        run: docker push ghcr.io/${{ secrets.GHCR_USER }}/auto-trading-bot:${{ github.sha }}
+        run: docker push ghcr.io/$REGISTRY_USER/auto-trading-bot:${{ github.sha }}
 
       - name: Tag & push latest
         run: |
-          docker tag ghcr.io/${{ secrets.GHCR_USER }}/auto-trading-bot:${{ github.sha }} ghcr.io/${{ secrets.GHCR_USER }}/auto-trading-bot:latest
-          docker push ghcr.io/${{ secrets.GHCR_USER }}/auto-trading-bot:latest
+          docker tag ghcr.io/$REGISTRY_USER/auto-trading-bot:${{ github.sha }} ghcr.io/$REGISTRY_USER/auto-trading-bot:latest
+          docker push ghcr.io/$REGISTRY_USER/auto-trading-bot:latest
