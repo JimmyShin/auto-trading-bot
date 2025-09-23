@@ -1,148 +1,72 @@
-# MA 크로스 봇 (5000달러 큰돈모드) - 피라미딩 업그레이드
+📈 MA Cross Bot – Pyramiding Upgrade
 
-바이낸스 선물 1시간봉 MA 크로스오버 + 피라미딩 자동매매 봇
+Binance Futures trading bot using 1h MA crossover + pyramiding with strict risk control.
 
-## 🎯 전략 요약
-
-| 항목 | 설정 |
-|------|------|
-| **신호** | 5MA/20MA 크로스오버 + 레짐필터 |
-| **타임프레임** | 1시간봉 |
-| **코인** | BTC, ETH, SOL |
-| **리스크** | 2%/트레이드 |
-| **레버리지** | 8x |
-| **포지션 상한** | $10,000 |
-| **일일 한도** | -6% |
-| **피라미딩** | +1.5R, +2.5R 단계별 추가 |
-
-## 🚀 실행
-
-```bash
-# 가상환경
+🚀 Quick Start
+# Setup
 python -m venv .venv
 .venv\Scripts\activate
-
-# 설치
 pip install -r requirements.txt
 
-# API 키 설정 (.env)
-BINANCE_KEY=너의키
-BINANCE_SECRET=너의시크릿
+# API keys in .env
+BINANCE_KEY=
+BINANCE_SECRET=
 TESTNET=False
 
-# 실행
+# Run bot
 python main.py
-```
 
-## ⚙️ 핵심 설정 (config.py)
+⚙️ Config (config.py)
+RISK_PCT = 0.02                # 2% per trade
+LEVERAGE = 8                   # 8x leverage
+POSITION_NOTIONAL_CAP = 10000  # $10k max
+DAILY_LOSS_LIMIT = 0.06        # -6% daily stop
 
-```python
-# 메인 설정
-RISK_PCT = 0.02                # 2%/트레이드
-LEVERAGE = 8                   # 8배 (1시간봉 적응)
-POSITION_NOTIONAL_CAP = 10000  # 포지션 상한 $10k
-DAILY_LOSS_LIMIT = 0.06        # 일일 -6% 한도
-
-# 코인
 UNIVERSE = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
 
-# 피라미딩 설정
 ENABLE_PYRAMIDING = True
 PYRAMID_LEVELS = [
-    (1.5, 0.5),  # +1.5R 달성시 50% 추가 (잠긴이익 범위)
-    (2.5, 0.3),  # +2.5R 달성시 30% 추가 (잠긴이익 범위)
+    (1.5, 0.5),  # +1.5R → add 50%
+    (2.5, 0.3),  # +2.5R → add 30%
 ]
 
-# ATR 설정
-ATR_STOP_K = 1.0      # 손절: 1.0*ATR (더 관대)
-ATR_TRAIL_K = 3.0     # 트레일: 3.0*ATR (더 관대)
-```
+ATR_STOP_K = 1.0   # Stop: 1×ATR
+ATR_TRAIL_K = 3.0  # Trail: 3×ATR
 
-## 📊 동작 원리
+📊 Strategy Rules
 
-### 진입
-- **롱**: 5MA > 20MA 크로스오버 (상승/횡보 레짐)
-- **숏**: 5MA < 20MA 크로스다운 (하락/횡보 레짐)
-- 새 1시간봉에서만 진입
-- EMA50/200 레짐 필터 적용
+Signal: 5MA/20MA crossover + EMA50/200 regime filter
 
-### 리스크 관리
-1. **포지션 크기**: `(5000 × 0.02) / 손절거리` × 8배
-2. **손절**: 진입가 ± 1.0*ATR (최소 0.4%)
-3. **트레일**: +1.5*ATR 시 본전 승격 → 3*ATR 트레일
-4. **피라미딩**: 잠긴 이익 범위에서만 추가 (원금 보호)
+Timeframe: 1h candles
 
-### 안전장치
-- 일일 -6% 도달시 신규 진입 중단
-- 펀딩 정산 1분 전 회피  
-- 포지션 $10k 상한
-- 피라미딩시 잠긴이익 50% 제한 (급반전 보호)
+Entry: Long in bullish regime, short in bearish
 
-## 💰 예상 수익/손실 (5000달러 기준)
+Stop/Trail: 1×ATR stop, 3×ATR trailing
 
-| 손절거리 | 포지션 크기 | 손익/회 | 피라미딩 최대 |
-|----------|-------------|---------|---------------|
-| 1.0% (BTC) | $8,000 | ±$100 | +$80 (1.8배) |
-| 1.5% (ETH) | $6,667 | ±$100 | +$67 (1.8배) |
-| 2.5% (SOL) | $4,000 | ±$100 | +$40 (1.8배) |
+Pyramiding: Add only from locked profit zone
 
-**하루 최대 손실**: $300 (6%)
-**피라미딩 효과**: 이길 때 1.8배 수익 (잠긴이익 범위)
+Safety: -6% daily loss cap, $10k position cap, funding avoidance
 
-## 🔧 일반적인 조정
+💡 Risk & Reward
 
-### 더 공격적으로
-```python
-RISK_PCT = 0.03              # 3%
-DAILY_LOSS_LIMIT = 0.08      # 8%
-```
+Risk: 2% per trade (≈$100 on $5000)
 
-### 더 보수적으로
-```python
-RISK_PCT = 0.015             # 1.5%
-DAILY_LOSS_LIMIT = 0.04      # 4%
-```
+Max daily loss: $300
 
-### 코인 변경
-```python
-# 안정적
-UNIVERSE = ["BTC/USDT", "ETH/USDT"]
+Pyramiding multiplier: up to 1.8× wins while capital stays safe
 
-# 더 많은 기회
-UNIVERSE = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "AVAX/USDT"]
-```
+📁 Project Structure
 
-## ⚠️ 주의사항
+main.py → bot runner + pyramiding logic
 
-- **5000달러 = 큰돈**이므로 함부로 설정 건드리지 마라
-- 테스트넷에서 먼저 돌려보기
-- 네트워크 끊어지면 수동으로 포지션 정리
-- 하루 -6% 먹으면 그날은 쉬는 날
+config.py → user settings
 
-## 🆕 업그레이드 내용
+strategy.py → MA cross + profit lock logic
 
-### 피라미딩 시스템
-- **+1.5R, +2.5R** 단계별 추가 포지션
-- **잠긴 이익 기반** 수량 제한 (원금 보호)
-- 급반전시에도 원금 손상 없음
+indicators.py → MA + regime filter
 
-### 레짐 필터  
-- **EMA50/200** 기반 추세 방향 확인
-- 상승 레짐에서만 롱, 하락 레짐에서만 숏
-- 횡보 구간은 양방향 허용
+state.json → persistent state
 
-### 1시간봉 전환
-- 15분봉 → 1시간봉 (노이즈 감소)
-- 12x → 8x 레버리지 (안정성 증가)
-- ATR 배수 조정 (더 관대한 손절/트레일)
+trades_DATE.csv → trade logs
 
-## 📁 파일 설명
-
-- `main.py`: 메인 실행파일 + 피라미딩 로직
-- `config.py`: 설정 + 피라미딩 설정
-- `strategy.py`: 전략 로직 + 잠긴이익 계산
-- `indicators.py`: MA 크로스 + 레짐 필터  
-- `state.json`: 봇 상태 저장 (자동 생성)
-- `trades_날짜.csv`: 거래 기록 + 피라미딩 추가분
-
-**피라미딩으로 "이길 때 크게, 질 때 안전하게" 완성.**
+Principle: “Win bigger when right, stay safe when wrong.”
