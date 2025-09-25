@@ -170,7 +170,8 @@ python -m pytest -v
 ### Simulation / Backtest
 
 - Offline baseline decisions: `python baseline.py --symbols BTC/USDT ETH/USDT --timeframe 1h --bars 180 --output data/testnet/baseline.json`
-- Train/test helpers: see `backtest/` (`sim.py`, `run_train_test.py`, `metrics.py`).
+- Train/test helpers: see `backtest/` (`sim.py`, `run_train_test.py`, `run_from_config.py`, `metrics.py`).
+- Ensure `data/backtest/ohlcv/` exists (offline candles) — it’s ignored by git but required for baseline regeneration.
 
 ### Live trading (testnet/live)
 
@@ -196,6 +197,12 @@ docker run --rm -e BINANCE_KEY=... -e BINANCE_SECRET=... -e TESTNET=true \
 ```
 
 GHCR publishing (on `main`) and optional remote deploy are configured in `.github/workflows/docker-publish.yml`.
+
+### Tools (MCP)
+
+- Extra utilities under `tools/` for MCP integration:
+  - `tools/mcp_server.py` provides bot inspection and safe control endpoints.
+  - See `tools/MCP_SETUP.md` for setup.
 
 ## Future Extensions
 
@@ -232,4 +239,3 @@ python -m pytest -v
 ```
 
 Open a PR; the GitHub Actions test workflow runs on push/PR and must pass before merge.
-

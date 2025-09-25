@@ -14,9 +14,17 @@ bot.log
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
+.coverage*
+
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
 
 # Logs
 *.log
 
-# Misc
-.DS_Store
+# Local config (use config.example.json)
+config.json
