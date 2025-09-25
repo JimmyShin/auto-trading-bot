@@ -189,6 +189,10 @@ python -m pytest -v
 
 Tests include checks that simulated backtest metrics align with baseline-derived metrics.
 
+Note on CI data
+- CI uses small, deterministic OHLCV fixtures under `tests/data/ohlcv/` (wired via env `BASELINE_OHLCV_DIR`) so regression tests run without downloading data.
+- Local/backtest runs should use real historical OHLCV under `data/backtest/ohlcv/` as documented above.
+
 ### Live trading (testnet/live)
 
 - Configure credentials and parameters in `config.json` or environment variables.

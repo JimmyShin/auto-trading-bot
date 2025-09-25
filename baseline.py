@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+import os
 from typing import Any, Dict, Iterable, List, Optional
 
 import pandas as pd
@@ -12,7 +13,7 @@ from config import ATR_LEN, TF, UNIVERSE
 from indicators import atr
 from strategy import DonchianATREngine
 
-DATA_ROOT = Path("data") / "backtest" / "ohlcv"
+DATA_ROOT = Path(os.getenv("BASELINE_OHLCV_DIR", str(Path("data") / "backtest" / "ohlcv")))
 DEFAULT_BASELINE_PATH = Path("data") / "testnet" / "baseline.json"
 
 
