@@ -12,7 +12,7 @@ from indicators import ma_crossover_signal
 
 # 테스트 데이터 생성 (현재 BTC 상황과 유사)
 test_data = pd.DataFrame({
-    'ts': pd.date_range('2025-09-11 00:00', periods=25, freq='1H'),
+    'ts': pd.date_range('2025-09-11 00:00', periods=25, freq='1h'),
     'open': [113000 + i*50 for i in range(25)],
     'high': [113200 + i*50 for i in range(25)],
     'low': [112800 + i*50 for i in range(25)],
