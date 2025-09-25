@@ -4,10 +4,14 @@ import csv
 import json
 import os
 from datetime import datetime
-from typing import Any, Dict, Optional, Callable
+from typing import Any, Dict, Optional, Callable, Iterable
 
 
-__all__ = ["Reporter"]
+import math
+import pandas as pd
+
+
+__all__ = ["Reporter", "generate_report", "save_report"]
 
 
 class Reporter:
@@ -475,3 +479,229 @@ class Reporter:
                 )
         except Exception as exc:
             print(f"[WARN] detailed entry log failed: {exc}")
+
+
+# ------------------------------------------------------------------
+# Analytics/report generation (no plotting)
+# ------------------------------------------------------------------
+def _coerce_trades(trades: Any) -> pd.DataFrame:
+    """Coerce input into a DataFrame with expected columns.
+
+    Supported inputs:
+    - pd.DataFrame
+    - Iterable[Mapping]
+
+    Tries to compute per-trade returns as decimal (e.g., 0.012 = 1.2%).
+    Priority:
+      1) If columns 'entry' and 'exit' exist, compute from prices and 'side'.
+      2) Else if 'pnl_pct' exists, infer scale (percent vs decimal).
+
+    Optionally uses 'entry_ts'/'exit_ts' or 'ts' for timestamps.
+    """
+    if isinstance(trades, pd.DataFrame):
+        df = trades.copy()
+    else:
+        try:
+            df = pd.DataFrame(list(trades))  # type: ignore[arg-type]
+        except Exception:
+            raise TypeError("trades must be a DataFrame or an iterable of mappings") from None
+
+    # Normalize side to lowercase for grouping later (if present)
+    if "side" in df.columns:
+        df["side"] = df["side"].astype(str).str.lower()
+
+    returns: Optional[pd.Series]
+    returns = None
+
+    # Case 1: compute from entry/exit and side
+    if {"entry", "exit"}.issubset(df.columns):
+        entry = pd.to_numeric(df["entry"], errors="coerce")
+        exitp = pd.to_numeric(df["exit"], errors="coerce")
+        side = df.get("side").astype(str).str.lower() if "side" in df.columns else "long"
+        long_mask = side.eq("long")
+        short_mask = side.eq("short")
+        ret = pd.Series(index=df.index, dtype="float64")
+        ret.loc[long_mask] = (exitp[long_mask] - entry[long_mask]) / entry[long_mask]
+        ret.loc[short_mask] = (entry[short_mask] - exitp[short_mask]) / entry[short_mask]
+        # Any remaining rows treated as long by default
+        other_mask = ~(long_mask | short_mask)
+        ret.loc[other_mask] = (exitp[other_mask] - entry[other_mask]) / entry[other_mask]
+        returns = ret.fillna(0.0)
+
+    # Case 2: fallback to pnl_pct (auto-scale)
+    if returns is None and "pnl_pct" in df.columns:
+        pnl = pd.to_numeric(df["pnl_pct"], errors="coerce").fillna(0.0)
+        # Heuristic: values > 1 likely represent percent units; scale to decimal
+        scale_div = 100.0 if pnl.abs().median() > 1.0 else 1.0
+        returns = (pnl / scale_div).astype(float)
+
+    if returns is None:
+        # As a last resort create zeros; metrics will mostly be zero
+        returns = pd.Series(0.0, index=df.index, dtype="float64")
+
+    df["return"] = returns
+
+    # Try to compose entry/exit timestamps for holding time
+    # Prefer explicit entry_ts/exit_ts columns; fall back to single 'ts'.
+    # If only one timestamp is present, hold time will be NaT and ignored in mean.
+    if "entry_ts" in df.columns:
+        df["entry_ts"] = pd.to_datetime(df["entry_ts"], errors="coerce", utc=True)
+    elif "ts" in df.columns:
+        df["entry_ts"] = pd.to_datetime(df["ts"], errors="coerce", utc=True)
+    else:
+        df["entry_ts"] = pd.NaT
+    if "exit_ts" in df.columns:
+        df["exit_ts"] = pd.to_datetime(df["exit_ts"], errors="coerce", utc=True)
+    else:
+        df["exit_ts"] = pd.NaT
+
+    return df
+
+
+def _max_drawdown_from_returns(returns: pd.Series) -> float:
+    """Compute MDD as max peak-to-trough drawdown / peak (ratio, not percent).
+
+    Builds an equity curve via cumulative product of (1 + r).
+    Returns 0.0 for empty series.
+    """
+    if returns is None or returns.empty:
+        return 0.0
+    equity = (1.0 + returns.fillna(0.0)).cumprod()
+    roll_max = equity.cummax()
+    dd = (roll_max - equity) / roll_max
+    return float(dd.max()) if not dd.empty else 0.0
+
+
+def _streaks(returns: pd.Series) -> tuple[int, int]:
+    """Return (max_win_streak, max_loss_streak) based on sign of returns."""
+    max_win = max_loss = cur_win = cur_loss = 0
+    for r in returns.fillna(0.0):
+        if r > 0:
+            cur_win += 1
+            cur_loss = 0
+        else:
+            cur_loss += 1
+            cur_win = 0
+        max_win = max(max_win, cur_win)
+        max_loss = max(max_loss, cur_loss)
+    return max_win, max_loss
+
+
+def _group_metrics_by_side(df: pd.DataFrame) -> Dict[str, float]:
+    out: Dict[str, float] = {
+        "long_trades": 0.0,
+        "long_win_rate": 0.0,
+        "long_expectancy": 0.0,
+        "long_profit_factor": 0.0,
+        "short_trades": 0.0,
+        "short_win_rate": 0.0,
+        "short_expectancy": 0.0,
+        "short_profit_factor": 0.0,
+    }
+    if "side" not in df.columns:
+        return out
+    for name, g in df.groupby(df["side"].astype(str).str.lower()):
+        r = g["return"].astype(float)
+        total = len(r)
+        wins = (r > 0).sum()
+        losses = (r <= 0).sum()
+        win_rate = (wins / total) if total else 0.0
+        avg_win = r[r > 0].mean() if wins > 0 else 0.0
+        avg_loss = abs(r[r <= 0].mean()) if losses > 0 else 0.0
+        expectancy = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
+        gross_win = r[r > 0].sum()
+        gross_loss = abs(r[r <= 0].sum())
+        profit_factor = (gross_win / gross_loss) if gross_loss > 0 else (math.inf if gross_win > 0 else 0.0)
+        prefix = f"{name}_"  # 'long_' or 'short_'
+        out[f"{prefix}trades"] = float(total)
+        out[f"{prefix}win_rate"] = float(win_rate)
+        out[f"{prefix}expectancy"] = float(expectancy)
+        out[f"{prefix}profit_factor"] = float(profit_factor)
+    return out
+
+
+def generate_report(trades: Any, config: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+    """Generate a single-row DataFrame of performance metrics.
+
+    Metrics:
+    - total_trades: count
+    - win_rate: wins / total
+    - payoff_ratio: avg(win) / abs(avg(loss))
+    - expectancy: (win_rate*avg(win)) - (loss_rate*avg(loss))
+    - mdd: max drawdown ratio based on equity curve from returns
+    - profit_factor: gross profit / gross loss
+    - sharpe: mean(returns)/std(returns) (no annualization)
+    - max_win_streak / max_loss_streak: consecutive positives/negatives
+    - avg_hold_time_sec: mean(exit_ts - entry_ts) in seconds (ignored if timestamps missing)
+    - long/short prefixed metrics via groupby(side)
+
+    Notes:
+    - Returns are computed from entry/exit if available, otherwise from pnl_pct (auto-scaled).
+    - All rates are expressed as ratios (e.g., 0.52 for 52%).
+    """
+    df = _coerce_trades(trades)
+    r = df["return"].astype(float).fillna(0.0)
+
+    total = int(len(r))
+    wins = int((r > 0).sum())
+    losses = int((r <= 0).sum())
+    win_rate = (wins / total) if total else 0.0
+    loss_rate = 1 - win_rate if total else 0.0
+    avg_win = float(r[r > 0].mean()) if wins > 0 else 0.0
+    avg_loss = float(abs(r[r <= 0].mean())) if losses > 0 else 0.0
+    payoff_ratio = (avg_win / avg_loss) if avg_loss > 0 else (math.inf if avg_win > 0 else 0.0)
+    expectancy = (win_rate * avg_win) - (loss_rate * avg_loss)
+
+    gross_win = float(r[r > 0].sum())
+    gross_loss = float(abs(r[r <= 0].sum()))
+    profit_factor = (gross_win / gross_loss) if gross_loss > 0 else (math.inf if gross_win > 0 else 0.0)
+
+    sharpe = 0.0
+    std = float(r.std(ddof=1)) if len(r) >= 2 else 0.0
+    mean = float(r.mean()) if len(r) else 0.0
+    if std > 0 and not math.isnan(std):
+        sharpe = mean / std
+
+    mdd = _max_drawdown_from_returns(r)
+    max_win_streak, max_loss_streak = _streaks(r)
+
+    # Average holding time in seconds (only when both timestamps are present)
+    hold_secs = None
+    if "entry_ts" in df.columns and "exit_ts" in df.columns:
+        mask = df["entry_ts"].notna() & df["exit_ts"].notna()
+        if mask.any():
+            dt = (df.loc[mask, "exit_ts"] - df.loc[mask, "entry_ts"]).dropna()
+            if not dt.empty:
+                hold_secs = float(dt.dt.total_seconds().mean())
+    avg_hold_time_sec = hold_secs if hold_secs is not None else 0.0
+
+    # Group-by side metrics
+    by_side = _group_metrics_by_side(df)
+
+    # Compose final single-row DataFrame
+    data: Dict[str, Any] = {
+        "total_trades": total,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "payoff_ratio": payoff_ratio,
+        "expectancy": expectancy,
+        "mdd": mdd,
+        "profit_factor": profit_factor,
+        "sharpe": sharpe,
+        "max_win_streak": max_win_streak,
+        "max_loss_streak": max_loss_streak,
+        "avg_hold_time_sec": avg_hold_time_sec,
+    }
+    data.update(by_side)
+
+    return pd.DataFrame([data])
+
+
+def save_report(df: pd.DataFrame, filepath: str) -> None:
+    """Save report DataFrame to Excel (index=False)."""
+    # Ensure parent directory exists
+    os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+    df.to_excel(filepath, index=False)
