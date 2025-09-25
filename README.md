@@ -173,6 +173,22 @@ python -m pytest -v
 - Train/test helpers: see `backtest/` (`sim.py`, `run_train_test.py`, `run_from_config.py`, `metrics.py`).
 - Ensure `data/backtest/ohlcv/` exists (offline candles) — it’s ignored by git but required for baseline regeneration.
 
+#### Backtesting usage
+
+- Quick per-symbol simulation (using offline OHLCV in parquet/csv):
+  ```bash
+  python -m backtest.sim --parquet data/backtest/ohlcv/1h/BTC_USDT.parquet
+  # or CSV if parquet engine unavailable
+  python -m backtest.sim --parquet data/backtest/ohlcv/1h/BTC_USDT.csv
+  ```
+
+- Run end-to-end from config (collect, validate, tune on train, evaluate OOS):
+  ```bash
+  python -m backtest.run_from_config --days 365 --oos_days 90 --base_dir data/backtest/ohlcv
+  ```
+
+Tests include checks that simulated backtest metrics align with baseline-derived metrics.
+
 ### Live trading (testnet/live)
 
 - Configure credentials and parameters in `config.json` or environment variables.
@@ -203,6 +219,11 @@ GHCR publishing (on `main`) and optional remote deploy are configured in `.githu
 - Extra utilities under `tools/` for MCP integration:
   - `tools/mcp_server.py` provides bot inspection and safe control endpoints.
   - See `tools/MCP_SETUP.md` for setup.
+
+Run locally:
+```bash
+python tools/mcp_server.py
+```
 
 ## Future Extensions
 
