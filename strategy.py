@@ -11,14 +11,18 @@ from config import (ATR_LEN, ATR_STOP_K, ATR_TRAIL_K,
 from indicators import atr
 from typing import Tuple
 
-def load_state() -> Dict:
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
+def load_state(path: Optional[str] = None) -> Dict:
+    """Load persisted engine state from disk."""
+    state_path = path or STATE_FILE
+    if os.path.exists(state_path):
+        with open(state_path, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
 
-def save_state(state: Dict):
-    tmp_path = f"{STATE_FILE}.tmp"
+def save_state(state: Dict, path: Optional[str] = None):
+    """Atomically persist engine state."""
+    state_path = path or STATE_FILE
+    tmp_path = f"{state_path}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, default=str)
     # Atomic replace with Windows-friendly retry (handles transient locks)
@@ -26,7 +30,7 @@ def save_state(state: Dict):
     last_err = None
     for i in range(5):
         try:
-            os.replace(tmp_path, STATE_FILE)
+            os.replace(tmp_path, state_path)
             return
         except PermissionError as e:
             last_err = e
@@ -36,7 +40,7 @@ def save_state(state: Dict):
             break
     # Fallback to move if replace kept failing
     try:
-        shutil.move(tmp_path, STATE_FILE)
+        shutil.move(tmp_path, state_path)
     except Exception:
         if last_err:
             raise last_err
@@ -47,14 +51,25 @@ class DonchianATREngine:
     - 5/20MA 크로스오버 신호
     - ATR 기반 사이징/손절/트레일
     """
-    def __init__(self):
-        self.state = load_state()  # {symbol: {...}}, {daily: {...}}
+    def __init__(self, state_path: Optional[str] = None, persist_state: bool = True, initial_state: Optional[Dict] = None):
+        self.state_path = state_path or STATE_FILE
+        self._persist_state = persist_state
+        if initial_state is not None:
+            self.state = initial_state
+        elif self._persist_state:
+            self.state = load_state(self.state_path)  # {symbol: {...}}, {daily: {...}}
+        else:
+            self.state = {}
+
+    def _save_state(self):
+        if self._persist_state:
+            save_state(self.state, self.state_path)
 
     def reset_daily_anchor(self, equity: float):
         today = datetime.utcnow().date().isoformat()
         if self.state.get("daily", {}).get("date") != today:
             self.state["daily"] = {"date": today, "anchor": float(equity)}
-            save_state(self.state)
+            self._save_state()
 
     def hit_daily_loss_limit(self, equity: float) -> bool:
         daily = self.state.get("daily")
@@ -342,7 +357,7 @@ class DonchianATREngine:
             "pyramid_added": [],                # 추가된 수량들 기록
         })
         self.state[symbol] = st
-        save_state(self.state)
+        self._save_state()
 
     def update_after_move(self, symbol: str, atr_abs: float, last_price: float):
         st = self.state.get(symbol)
@@ -377,7 +392,7 @@ class DonchianATREngine:
                     print(f"🔺 {symbol} 피라미딩 트리거: +{profit_r:.1f}R 달성")
 
         self.state[symbol] = st
-        save_state(self.state)
+        self._save_state()
         return st
     
     def calc_locked_profit_pyramid_limit(self, symbol: str, atr_abs: float, current_price: float, add_ratio: float) -> float:
@@ -423,7 +438,7 @@ class DonchianATREngine:
         st = self.state.get(symbol, {})
         st.update({"in_position": False})
         self.state[symbol] = st
-        save_state(self.state)
+        self._save_state()
     
     def record_stop_loss_exit(self, symbol: str, side: str, exit_price: float):
         """손절 청산 기록 - 구조적 리셋 조건을 위해"""
@@ -439,7 +454,7 @@ class DonchianATREngine:
             }
         })
         self.state[symbol] = st
-        save_state(self.state)
+        self._save_state()
     
     def update_reset_tracking(self, symbol: str, df: pd.DataFrame):
         """구조적 리셋 조건 추적 업데이트"""
@@ -467,7 +482,7 @@ class DonchianATREngine:
             
         st["last_stop_loss"] = last_stop
         self.state[symbol] = st
-        save_state(self.state)
+        self._save_state()
     
     def check_reset_conditions(self, symbol: str, df: pd.DataFrame, last_stop: dict) -> dict:
         """구조적 리셋 조건 검사"""
@@ -596,7 +611,7 @@ class DonchianATREngine:
                     "original_qty": abs(actual_size)
                 })
                 self.state[symbol] = st
-                save_state(self.state)
+                self._save_state()
                 return True
                 
             elif not has_actual_position and state_has_position:

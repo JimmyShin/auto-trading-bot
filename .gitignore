@@ -4,7 +4,10 @@
 
 # Sensitive/runtime files
 state.json
-data/
+data/**
+!data/testnet/
+data/testnet/**
+!data/testnet/baseline.json
 bot.log
 
 # Python cache

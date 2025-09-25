@@ -86,7 +86,6 @@ def log_trade(symbol: str, side: str, entry_price: float, qty: float, reason: st
     except Exception as e:
         print(f"[WARN] trade log failed: {e}")
 
-
 def log_exit(symbol: str, side: str, exit_price: float, pnl_pct: float, reason: str = "exit"):
     try:
         import csv
@@ -164,12 +163,12 @@ def log_exit(symbol: str, side: str, exit_price: float, pnl_pct: float, reason: 
 def log_signal_analysis(symbol,
                         current_price,
                         sig,
-                        is_new_bar,
-                        funding_avoid,
-                        daily_loss_hit,
-                        equity_usdt,
-                        daily_dd_pct,
-                        decision,
+                        is_new_bar=None,
+                        funding_avoid=None,
+                        daily_loss_hit=None,
+                        equity_usdt=None,
+                        daily_dd_pct=None,
+                        decision=None,
                         skip_reason=""):
     """Append a row to signal_analysis_YYYY-MM-DD.csv with key fields."""
     try:
@@ -178,6 +177,28 @@ def log_signal_analysis(symbol,
         base = _data_base_dir()
         fn = os.path.join(base, f"signal_analysis_{date}.csv")
         exists = os.path.exists(fn)
+        if isinstance(is_new_bar, dict) and not isinstance(funding_avoid, (bool, type(None))):
+            legacy_analysis = is_new_bar
+            legacy_decision = funding_avoid
+            legacy_skip = daily_loss_hit
+            is_new_bar = legacy_analysis.get('is_new_bar')
+            funding_avoid = legacy_analysis.get('funding_avoid')
+            daily_loss_hit = legacy_analysis.get('daily_loss_hit')
+            equity_usdt = legacy_analysis.get('equity_usdt')
+            daily_dd_pct = legacy_analysis.get('daily_dd_pct')
+            if decision is None:
+                decision = legacy_decision
+            if not skip_reason and legacy_skip is not None:
+                skip_reason = legacy_skip
+        try:
+            equity_usdt = float(equity_usdt if equity_usdt is not None else 0.0)
+        except Exception:
+            equity_usdt = 0.0
+        try:
+            daily_dd_pct = float(daily_dd_pct if daily_dd_pct is not None else 0.0)
+        except Exception:
+            daily_dd_pct = 0.0
+        decision = decision if decision is not None else ''
 
         fast_ma = sig.get('fast_ma', 0.0) if isinstance(sig, dict) else 0.0
         slow_ma = sig.get('slow_ma', 0.0) if isinstance(sig, dict) else 0.0
@@ -214,6 +235,65 @@ def log_signal_analysis(symbol,
     except Exception as e:
         print(f"[WARN] signal log failed: {e}")
 
+
+def log_filtered_signal(symbol,
+                       current_price,
+                       sig,
+                       analysis=None,
+                       decision="SKIP",
+                       skip_reason="",
+                       **extra):
+    """Persist details about signals that were skipped by filters."""
+    try:
+        ts = _now_str()
+        date = _now_str("%Y-%m-%d")
+        base = _data_base_dir()
+        fn = os.path.join(base, f"filtered_signals_{date}.csv")
+        exists = os.path.exists(fn)
+
+        sig = sig or {}
+        analysis_payload = {}
+        if isinstance(analysis, dict):
+            analysis_payload.update({k: analysis[k] for k in analysis.keys()})
+        if extra:
+            analysis_payload.update({k: extra[k] for k in extra.keys() if k not in analysis_payload})
+
+        fast_ma = sig.get('fast_ma', 0.0)
+        slow_ma = sig.get('slow_ma', 0.0)
+        ma_diff = ((float(fast_ma) / float(slow_ma) - 1) * 100.0) if slow_ma else 0.0
+        candle_filter = sig.get('candle_filter', {}) or {}
+
+        import csv
+        with open(fn, 'a', encoding='utf-8', newline='') as f:
+            fieldnames = [
+                'timestamp','symbol','price','decision','skip_reason',
+                'fast_ma','slow_ma','ma_diff_pct','long_signal','short_signal',
+                'candle_position_ratio','candle_safe_long','candle_safe_short',
+                'context'
+            ]
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not exists:
+                writer.writeheader()
+            row = {
+                'timestamp': ts,
+                'symbol': symbol,
+                'price': float(current_price),
+                'decision': decision or 'SKIP',
+                'skip_reason': skip_reason or analysis_payload.get('skip_reason', ''),
+                'fast_ma': fast_ma,
+                'slow_ma': slow_ma,
+                'ma_diff_pct': round(ma_diff, 3),
+                'long_signal': bool(sig.get('long', False)),
+                'short_signal': bool(sig.get('short', False)),
+                'candle_position_ratio': candle_filter.get('candle_position_ratio', 0.0),
+                'candle_safe_long': bool(candle_filter.get('candle_safe_long')),
+                'candle_safe_short': bool(candle_filter.get('candle_safe_short')),
+                'context': json.dumps(analysis_payload, default=str) if analysis_payload else ''
+            }
+            writer.writerow(row)
+    except Exception as e:
+        print(f"[WARN] filtered signal log failed: {e}")
+
 def log_detailed_entry(symbol,
                        side,
                        entry_price,
@@ -222,15 +302,34 @@ def log_detailed_entry(symbol,
                        risk_multiplier,
                        sig,
                        atr_abs,
-                       equity_usdt,
+                       equity_usdt=None,
                        reason="signal",
-                       reasons_list=None):
+                       reasons_list=None,
+                       **kwargs):
     """Append a detailed entry row to detailed_entries_YYYY-MM-DD.csv."""
     try:
         ts = _now_str()
         date = _now_str("%Y-%m-%d")
         base = _data_base_dir()
         fn = os.path.join(base, f"detailed_entries_{date}.csv")
+        equity_alias = kwargs.pop('equity', None)
+        if kwargs:
+            unexpected = ', '.join(kwargs.keys())
+            raise TypeError(f"Unexpected keyword arguments: {unexpected}")
+        if equity_usdt is not None and equity_alias is not None:
+            try:
+                if abs(float(equity_usdt) - float(equity_alias)) > 1e-6:
+                    print(f"[WARN] log_detailed_entry equity mismatch ({equity_usdt} vs {equity_alias})")
+            except Exception:
+                pass
+        equity_value = equity_usdt if equity_usdt is not None else equity_alias
+        if equity_value is None:
+            raise ValueError('equity_usdt or equity must be provided')
+        try:
+            equity_value = float(equity_value)
+        except Exception:
+            raise ValueError('equity must be numeric') from None
+        equity_usdt = equity_value
         exists = os.path.exists(fn)
 
         position_value = float(qty) * float(entry_price)
