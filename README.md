@@ -1,74 +1,235 @@
-﻿# Auto Trading Bot
+# Auto Trading Bot
 
-## 1. Project Overview
-We are building an automated trading bot. Phase 1 focused on establishing a safety net by locking in baseline behaviour, regression tests, and continuous integration. The current codebase captures the strategy's decisions deterministically, verifies them against a baseline, and runs tests automatically on every push.
+Modular, test‑driven crypto trading bot with risk management, deterministic signals, rich reporting, and CI/CD + Docker.
 
-## 2. Baseline Dataset
-`data/testnet/baseline.json` stores the candles used for analysis, the resulting entry/exit signals, stop-loss values, and any skip reasons. This file represents the expected behaviour of the core strategy and serves as the ground truth for regression testing. Rebuild it only after intentional strategy updates.
+## Overview
 
-## 3. Pytest Regression Tests
-Baseline parity is enforced with `pytest`. The primary test regenerates decisions using the current strategy and compares them to `baseline.json`. Run tests locally before committing:
+- Project goal: build a dependable, modular trading bot protected by tests and reproducible baselines.
+- Key features:
+  - Strategy module producing deterministic signals for regression testing.
+  - Risk management for sizing, stops, pyramiding, structural resets, and daily loss limits.
+  - Exchange API wrapper to isolate third‑party dependencies.
+  - Reporter for logging trades/signals and generating analytics (DataFrame + Excel).
+  - CI/CD with pytest on push/PR, Docker build/publish, and optional deploy.
+
+## Architecture
+
+### strategy.py
+
+- Engine: `class DonchianATREngine(persist_state: bool = True, initial_state: dict | None = None, risk_manager: RiskManager | None = None)`
+- Responsibilities: deterministic signal generation, entry planning, state persistence, daily risk anchors.
+- Key methods:
+  - `reset_daily_anchor(equity: float) -> None`
+  - `detect_signal(df: pd.DataFrame) -> dict`
+  - `make_entry_plan(symbol: str, df: pd.DataFrame, equity: float, price: float, atr_abs: float, is_new_bar: bool, can_reenter: bool, funding_avoid: bool, daily_loss_hit: bool) -> dict`
+- Example usage:
+```python
+from strategy import DonchianATREngine
+from indicators import atr
+
+engine = DonchianATREngine(persist_state=False, initial_state={})
+engine.reset_daily_anchor(20_000)
+atr_abs = float(atr(df, 14))
+sig = engine.detect_signal(df)
+plan = engine.make_entry_plan(
+    symbol="BTC/USDT", df=df, equity=20_000, price=float(df.close.iloc[-1]), atr_abs=atr_abs,
+    is_new_bar=True, can_reenter=True, funding_avoid=False, daily_loss_hit=False,
+)
+```
+
+### risk.py
+
+- Manager: `class RiskManager(state: dict | None = None)`
+- Responsibilities: daily anchors and loss limit; ATR‑based sizing; trailing stops; pyramiding; structural reset checks; broker sync.
+- Key methods:
+  - `calc_qty_by_risk(equity_usdt, price, atr_abs, leverage, symbol="") -> float`
+  - `calc_qty_by_risk_adjusted(..., risk_pct: float | None = None) -> float`
+  - `trail_stop_price(side, entry_price, last_price, atr_abs, be_promoted) -> float`
+  - `update_symbol_state_on_entry(symbol, side, entry_px, qty=0) -> dict`
+  - `update_after_move(symbol, atr_abs, last_price) -> dict | None`
+  - `reset_daily_anchor(equity) -> bool` and `hit_daily_loss_limit(equity) -> bool`
+
+### exchange_api.py
+
+- Adapter: `class ExchangeAPI(client: Optional[BinanceUSDM] = None, auto_connect: bool = False)`
+- Responsibilities: thin wrapper around the Binance Futures client; market data, account state, orders.
+- Example:
+```python
+from exchange_api import ExchangeAPI
+ex = ExchangeAPI(auto_connect=True)
+ohlcv = ex.fetch_ohlcv("BTC/USDT", "1h", limit=200)
+equity = ex.get_equity_usdt()
+```
+
+### reporter.py
+
+- Logger: `class Reporter(base_dir: str, environment: str)` with `Reporter.from_config()`.
+- CSV logging: `log_trade`, `log_exit`, `log_signal_analysis`, `log_filtered_signal`, `log_detailed_entry` (files under `data/<env>/`).
+- Analytics:
+  - `generate_report(trades) -> pd.DataFrame` returns a single‑row DataFrame of metrics (see Reporting).
+  - `save_report(df, filepath)` writes Excel with `index=False`.
+- Example:
+```python
+from reporter import generate_report, save_report
+rep_df = generate_report(trades_df)
+save_report(rep_df, "reports/performance.xlsx")
+```
+
+## Configuration (config.json)
+
+`config.py` reads an optional `config.json` (override with env `BOT_CONFIG_JSON`). JSON keys override environment variables.
+
+Common keys:
+```json
+{
+  "binance_key": "...",
+  "binance_secret": "...",
+  "testnet": true,
+  "safe_restart": true,
+  "quote": "USDT",
+  "universe": ["BTC/USDT", "ETH/USDT"],
+  "risk_pct": 0.025,
+  "leverage": 10,
+  "enable_pyramiding": true,
+  "pyramid_levels": [[2.0, 0.3], [3.0, 0.2]],
+  "atr_len": 14,
+  "atr_stop_k": 1.2,
+  "atr_trail_k": 2.5,
+  "daily_loss_limit": 0.06,
+  "funding_avoid_min": 5,
+  "poll_sec": 30,
+  "timeframe": "1h",
+  "lookback": 400,
+  "state_file": "state.json",
+  "data_dir": "data",
+  "emergency_policy": "protect_only",
+  "emergency_min_pnl_to_close_pct": 0.0,
+  "emergency_stop_fallback_pct": 0.015,
+  "position_cap": {"multiple": 2.0, "min": 10000, "max": 25000}
+}
+```
+
+## Safety & Quality
+
+### Baseline.json regression testing
+
+- `data/testnet/baseline.json` stores the candles, expected signals (decisions), stops and reasons. It is the ground truth.
+- Deterministic generator (baseline.py) rebuilds expected outputs from offline OHLCV snapshots.
+
+### Pytest suite
+
+- Signals equality: regenerated symbols’ records must match baseline exactly.
+- Metrics comparison: Win Rate, Expectancy, MDD, Profit Factor, Sharpe must match baseline metrics within tolerance (rel/abs = 1e‑2).
+- Relevant tests:
+  - `tests/test_regression.py` (signals exact + metrics approx)
+  - `test_baseline_regression.py` (baseline structure)
+  - `test_report_metrics.py` (unit validation of metrics)
+
+Run locally:
+```bash
+python -m pytest -v
+```
+
+### GitHub Actions
+
+- `.github/workflows/pytest.yml` runs tests on `push` and `pull_request`. Failures block PR merges.
+- `.github/workflows/docker-publish.yml` builds/pushes Docker images to GHCR and can deploy via SSH on main.
+
+## Reporting
+
+### Core metrics
+
+- Trade count = number of closed trades
+- Win rate = wins / total
+- RRR (payoff ratio) = avg(win) / abs(avg(loss))
+- Daily/weekly/monthly change = aggregate returns over those periods
+  - Daily report implemented via `scripts/performance_report.py`
+  - Weekly/monthly can be added by grouping returns by calendar week/month
+
+### Extended metrics (generate_report)
+
+- Expectancy = (win_rate*avg(win)) − (loss_rate*avg(loss))
+- MDD = max peak‑to‑trough drawdown / peak (ratio)
+- Profit Factor = gross profit / gross loss
+- Sharpe Ratio = mean(returns) / std(returns) (no annualisation)
+- Win/Loss streaks = max consecutive wins/losses
+- Average holding time = mean(exit_ts − entry_ts) in seconds
+- Long/Short performance = per‑side trades, win rate, expectancy, profit factor
+
+### Output formats
+
+- Pandas DataFrame: `generate_report(...) -> pd.DataFrame`
+- Excel export: `save_report(df, path)` with `index=False`
+- CSV summaries:
+  - `scripts/performance_report.py` (by day / by symbol / by day+symbol)
+  - `scripts/daily_report.py` (daily CSV from trade logs)
+  - `scripts/refresh_baseline_metrics.py [--regen]` (embed `report_metrics` into baseline)
+
+## Operations
+
+### Simulation / Backtest
+
+- Offline baseline decisions: `python baseline.py --symbols BTC/USDT ETH/USDT --timeframe 1h --bars 180 --output data/testnet/baseline.json`
+- Train/test helpers: see `backtest/` (`sim.py`, `run_train_test.py`, `metrics.py`).
+
+### Live trading (testnet/live)
+
+- Configure credentials and parameters in `config.json` or environment variables.
+- Run: `python main.py`
+
+### Developer quickstart
+
+```bash
+python -m pytest -v
+python baseline.py --symbols BTC/USDT ETH/USDT --timeframe 1h --bars 180 --output data/testnet/baseline.json
+python scripts/refresh_baseline_metrics.py --regen
+python main.py
+```
+
+### Docker
+
+Build/run locally:
+```bash
+docker build -t auto-trading-bot:local .
+docker run --rm -e BINANCE_KEY=... -e BINANCE_SECRET=... -e TESTNET=true \
+  -v $(pwd)/data:/app/data auto-trading-bot:local
+```
+
+GHCR publishing (on `main`) and optional remote deploy are configured in `.github/workflows/docker-publish.yml`.
+
+## Future Extensions
+
+- Strategy diversification (multi‑system, regime switching)
+- Advanced risk models (Kelly fraction, Monte Carlo bands)
+- Reporting to Slack/Telegram and dashboards (Grafana/Prometheus)
+- Scaling with cloud/VPS (Docker Compose, k8s, horizontal workers)
+
+## Instructions for Contributors
+
+### Add a new strategy
+
+- Implement another engine class alongside `DonchianATREngine` exposing:
+  - `detect_signal(df) -> dict`
+  - `make_entry_plan(...) -> dict`
+- Keep outputs deterministic and serialisable so they can be captured in the baseline.
+
+### Update baseline.json
+
+1. Regenerate with intentional logic changes:
+   ```bash
+   python baseline.py --symbols BTC/USDT ETH/USDT --timeframe 1h --bars 180 --output data/testnet/baseline.json
+   ```
+2. Embed report metrics to be used by regression tests:
+   ```bash
+   python scripts/refresh_baseline_metrics.py --regen
+   ```
+3. Run tests and commit both code and updated baseline.
+
+### Verify with pytest + CI
 
 ```bash
 python -m pytest -v
 ```
 
-If the test fails, either the baseline is stale or the strategy logic has changed. Re-run the baseline generator after reviewing the changes.
+Open a PR; the GitHub Actions test workflow runs on push/PR and must pass before merge.
 
-## 4. GitHub Actions CI
-The workflow `.github/workflows/pytest.yml` installs dependencies and executes `pytest` on every push or pull request. CI must pass before merges, ensuring the baseline and strategy stay in sync across contributors and environments.
-
-## 5. Working Cycle
-1. Modify strategy or related code.
-2. Run `python -m pytest -v` locally.
-3. If behaviour changes are intentional, regenerate `baseline.json` with the baseline generator.
-4. Commit the code and updated baseline.
-5. Push to trigger the GitHub Actions workflow.
-
-## 6. Module Layout
-- `main.py` wires together the exchange adapter, risk engine, and reporting loop.
-- `strategy.py` keeps deterministic signal generation and baseline compatibility.
-- `risk.py` owns position sizing, daily guards, structural reset tracking, and state persistence.
-- `reporter.py` centralises trade, signal, and diagnostics logging.
-- `exchange_api.py` wraps the Binance client so orchestration code depends on a narrow adapter.
-
-## 7. JSON Configuration
-`config.py` now reads an optional `config.json` (override the location with `BOT_CONFIG_JSON`). Keys present in the file take precedence over environment variables. Common fields are listed below:
-
-| Key | Type | Default | Description |
-| --- | --- | --- | --- |
-| `binance_key` / `binance_secret` | string | `""` | API credentials for Binance Futures. |
-| `testnet` | bool | `true` | Use Binance testnet endpoints when `true`. |
-| `safe_restart` | bool | `true` | Enforce protective stop placement on restart. |
-| `quote` | string | `"USDT"` | Quote currency for universe symbols. |
-| `universe` | list or comma string | preset list | Trading symbols monitored by the bot. |
-| `risk_pct` | float | `0.025` | Fraction of equity risked per entry. |
-| `leverage` | number | `10` | Leverage applied when sizing orders. |
-| `enable_pyramiding` | bool | `true` | Allow additive scaling once profit thresholds hit. |
-| `pyramid_levels` | array | `[[2.0, 0.3], [3.0, 0.2]]` | Each entry is `[R-multiple, add_ratio]`. |
-| `atr_len` | int | `14` | ATR lookback for volatility calculations. |
-| `atr_stop_k` / `atr_trail_k` | float | `1.2` / `2.5` | Multipliers for initial and trailing stops. |
-| `daily_loss_limit` | float | `0.06` | Max daily drawdown before trades are skipped. |
-| `funding_avoid_min` | int | `5` | Minutes before funding to block new entries. |
-| `poll_sec` | int | `30` | Delay between main loop iterations. |
-| `timeframe` / `lookback` | string, int | `"1h"`, `400` | Candle timeframe and history depth. |
-| `state_file` | string | `"state.json"` | Path for persisted strategy state. |
-| `data_dir` | string | `"data"` | Base directory for reports and logs. |
-| `emergency_policy` | string | `"protect_only"` | Shutdown policy when exits are forced. |
-| `emergency_min_pnl_to_close_pct` | float | `0.0` | Minimum PnL required to flatten during emergency. |
-| `emergency_stop_fallback_pct` | float | `0.015` | Fallback stop distance when no trailing stop exists. |
-
-Nested keys:
-
-- `position_cap.multiple` (default `2.0`) scales the notional cap vs equity.
-- `position_cap.min` / `position_cap.max` bound the cap in USD.
-
-A starter template lives in `config.example.json`; copy it to `config.json` and fill in your credentials before running the bot.
-
-## 8. Roadmap
-- **Phase 2 – Refactoring:** Modularise the strategy and state management for easier iteration.
-- **Phase 3 – Reporting Enhancements:** Extend analytics/exporter scripts for richer monitoring and historical insight.
-- **Phase 4 – CI Improvements:** Add linting, type checks, and coverage gates to the pipeline.
-- **Phase 5 – Fail-Safes:** Introduce runtime guards, alerting, and automated kill switches.
-
-Phase 1 is complete; focus shifts to architecture, observability, and resilience in upcoming sprints.
