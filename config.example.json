@@ -1,0 +1,30 @@
+﻿{
+  "binance_key": "YOUR_KEY",
+  "binance_secret": "YOUR_SECRET",
+  "testnet": true,
+  "safe_restart": true,
+  "quote": "USDT",
+  "universe": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "AVAX/USDT"],
+  "risk_pct": 0.025,
+  "leverage": 10,
+  "enable_pyramiding": true,
+  "pyramid_levels": [[2.0, 0.3], [3.0, 0.2]],
+  "atr_len": 14,
+  "atr_stop_k": 1.2,
+  "atr_trail_k": 2.5,
+  "daily_loss_limit": 0.06,
+  "funding_avoid_min": 5,
+  "poll_sec": 30,
+  "timeframe": "1h",
+  "lookback": 400,
+  "state_file": "state.json",
+  "data_dir": "data",
+  "position_cap": {
+    "multiple": 2.0,
+    "min": 10000,
+    "max": 25000
+  },
+  "emergency_policy": "protect_only",
+  "emergency_min_pnl_to_close_pct": 0.0,
+  "emergency_stop_fallback_pct": 0.015
+}

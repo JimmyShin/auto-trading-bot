@@ -1,0 +1,477 @@
+﻿from __future__ import annotations
+
+import csv
+import json
+import os
+from datetime import datetime
+from typing import Any, Dict, Optional, Callable
+
+
+__all__ = ["Reporter"]
+
+
+class Reporter:
+    """Handles structured CSV logging for trading activity and diagnostics."""
+
+    def __init__(self, base_dir: str, environment: str, clock: Optional[Callable[[], datetime]] = None) -> None:
+        self.base_dir = base_dir
+        self.environment = environment
+        self._clock = clock or datetime.now
+
+    @classmethod
+    def from_config(cls) -> "Reporter":
+        from config import DATA_BASE_DIR, TESTNET
+
+        env = "testnet" if TESTNET else "live"
+        return cls(DATA_BASE_DIR, env)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _root_dir(self) -> str:
+        path = os.path.join(self.base_dir, self.environment)
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _now_str(self, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+        return self._clock().strftime(fmt)
+
+    # ------------------------------------------------------------------
+    # Public logging API
+    # ------------------------------------------------------------------
+    def log_trade(self, symbol: str, side: str, entry_price: float, qty: float, reason: str = "signal") -> None:
+        ts = self._now_str()
+        date = self._now_str("%Y-%m-%d")
+        filename = os.path.join(self._root_dir(), f"trades_{date}.csv")
+        exists = os.path.exists(filename)
+        fieldnames = [
+            "timestamp",
+            "symbol",
+            "side",
+            "entry_price",
+            "qty",
+            "reason",
+            "status",
+            "exit_timestamp",
+            "exit_price",
+            "pnl_pct",
+            "exit_reason",
+        ]
+
+        row = {
+            "timestamp": ts,
+            "symbol": symbol,
+            "side": side,
+            "entry_price": entry_price,
+            "qty": qty,
+            "reason": reason,
+            "status": "OPEN",
+            "exit_timestamp": "",
+            "exit_price": "",
+            "pnl_pct": "",
+            "exit_reason": "",
+        }
+
+        try:
+            with open(filename, "a", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                if not exists or os.path.getsize(filename) == 0:
+                    writer.writeheader()
+                writer.writerow(row)
+        except Exception as exc:
+            print(f"[WARN] trade log failed: {exc}")
+
+    def log_exit(self, symbol: str, side: str, exit_price: float, pnl_pct: float, reason: str = "exit") -> None:
+        ts = self._now_str()
+        date = self._now_str("%Y-%m-%d")
+        filename = os.path.join(self._root_dir(), f"trades_{date}.csv")
+        fieldnames = [
+            "timestamp",
+            "symbol",
+            "side",
+            "entry_price",
+            "qty",
+            "reason",
+            "status",
+            "exit_timestamp",
+            "exit_price",
+            "pnl_pct",
+            "exit_reason",
+        ]
+
+        try:
+            if not os.path.exists(filename):
+                with open(filename, "w", encoding="utf-8", newline="") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerow(
+                        {
+                            "timestamp": ts,
+                            "symbol": symbol,
+                            "side": side,
+                            "status": "CLOSED",
+                            "exit_timestamp": ts,
+                            "exit_price": exit_price,
+                            "pnl_pct": pnl_pct,
+                            "exit_reason": reason,
+                            "entry_price": "",
+                            "qty": "",
+                            "reason": "",
+                        }
+                    )
+                return
+
+            rows = []
+            with open(filename, "r", encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    for field in fieldnames:
+                        row.setdefault(field, "")
+                    rows.append(row)
+
+            found = False
+            for row in reversed(rows):
+                if row.get("symbol") == symbol and row.get("status", "").upper() == "OPEN":
+                    row.update(
+                        {
+                            "status": "CLOSED",
+                            "exit_timestamp": ts,
+                            "exit_price": exit_price,
+                            "pnl_pct": pnl_pct,
+                            "exit_reason": reason,
+                        }
+                    )
+                    found = True
+                    break
+
+            if not found:
+                rows.append(
+                    {
+                        "timestamp": ts,
+                        "symbol": symbol,
+                        "side": side,
+                        "entry_price": "",
+                        "qty": "",
+                        "reason": "",
+                        "status": "CLOSED",
+                        "exit_timestamp": ts,
+                        "exit_price": exit_price,
+                        "pnl_pct": pnl_pct,
+                        "exit_reason": reason,
+                    }
+                )
+
+            with open(filename, "w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                writer.writeheader()
+                for row in rows:
+                    writer.writerow({field: row.get(field, "") for field in fieldnames})
+        except Exception as exc:
+            print(f"[WARN] exit log failed: {exc}")
+
+    def log_signal_analysis(
+        self,
+        symbol: str,
+        current_price: float,
+        signal: Dict[str, Any],
+        is_new_bar: Optional[bool] = None,
+        funding_avoid: Optional[bool] = None,
+        daily_loss_hit: Optional[bool] = None,
+        equity_usdt: Optional[float] = None,
+        daily_dd_pct: Optional[float] = None,
+        decision: Optional[str] = None,
+        skip_reason: str = "",
+    ) -> None:
+        ts = self._now_str()
+        date = self._now_str("%Y-%m-%d")
+        filename = os.path.join(self._root_dir(), f"signal_analysis_{date}.csv")
+        exists = os.path.exists(filename)
+
+        # Backward compatibility: legacy call packed values in dict
+        if isinstance(is_new_bar, dict) and not isinstance(funding_avoid, (bool, type(None))):
+            legacy = is_new_bar
+            legacy_decision = funding_avoid
+            legacy_skip = daily_loss_hit
+            is_new_bar = legacy.get("is_new_bar")
+            funding_avoid = legacy.get("funding_avoid")
+            daily_loss_hit = legacy.get("daily_loss_hit")
+            equity_usdt = legacy.get("equity_usdt")
+            daily_dd_pct = legacy.get("daily_dd_pct")
+            if decision is None:
+                decision = legacy_decision
+            if not skip_reason and legacy_skip is not None:
+                skip_reason = legacy_skip
+
+        try:
+            equity_val = float(equity_usdt or 0.0)
+        except Exception:
+            equity_val = 0.0
+        try:
+            dd_val = float(daily_dd_pct or 0.0)
+        except Exception:
+            dd_val = 0.0
+
+        decision = decision or ""
+        signal = signal or {}
+        fast_ma = signal.get("fast_ma", 0.0)
+        slow_ma = signal.get("slow_ma", 0.0)
+        ma_diff_pct = ((float(fast_ma) / float(slow_ma) - 1) * 100.0) if slow_ma else 0.0
+        alignment = (signal.get("alignment") or {}) if isinstance(signal, dict) else {}
+        candle_filter = (signal.get("candle_filter") or {}) if isinstance(signal, dict) else {}
+        risk_multiplier = (signal.get("risk_multiplier") or {}) if isinstance(signal, dict) else {}
+
+        try:
+            with open(filename, "a", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                if not exists:
+                    writer.writerow(
+                        [
+                            "timestamp",
+                            "symbol",
+                            "price",
+                            "fast_ma",
+                            "slow_ma",
+                            "ma_diff_pct",
+                            "long_signal",
+                            "short_signal",
+                            "regime",
+                            "long_aligned",
+                            "short_aligned",
+                            "long_cross",
+                            "short_cross",
+                            "candle_position_ratio",
+                            "candle_safe_long",
+                            "candle_safe_short",
+                            "risk_multiplier_long",
+                            "risk_multiplier_short",
+                            "is_new_bar",
+                            "funding_avoid",
+                            "daily_loss_hit",
+                            "equity_usdt",
+                            "daily_dd_pct",
+                            "decision",
+                            "skip_reason",
+                        ]
+                    )
+                writer.writerow(
+                    [
+                        ts,
+                        symbol,
+                        current_price,
+                        fast_ma,
+                        slow_ma,
+                        round(ma_diff_pct, 3),
+                        bool(signal.get("long")),
+                        bool(signal.get("short")),
+                        (signal.get("regime") if isinstance(signal, dict) else "UNKNOWN"),
+                        bool(alignment.get("long_aligned")),
+                        bool(alignment.get("short_aligned")),
+                        bool(alignment.get("long_cross")),
+                        bool(alignment.get("short_cross")),
+                        candle_filter.get("candle_position_ratio", 0.0),
+                        bool(candle_filter.get("candle_safe_long")),
+                        bool(candle_filter.get("candle_safe_short")),
+                        risk_multiplier.get("long", 1.0),
+                        risk_multiplier.get("short", 1.0),
+                        bool(is_new_bar),
+                        bool(funding_avoid),
+                        bool(daily_loss_hit),
+                        equity_val,
+                        round(dd_val, 3),
+                        decision,
+                        skip_reason or "",
+                    ]
+                )
+        except Exception as exc:
+            print(f"[WARN] signal log failed: {exc}")
+
+    def log_filtered_signal(
+        self,
+        symbol: str,
+        current_price: float,
+        signal: Dict[str, Any],
+        analysis: Optional[Dict[str, Any]] = None,
+        decision: str = "SKIP",
+        skip_reason: str = "",
+        **extra: Any,
+    ) -> None:
+        ts = self._now_str()
+        date = self._now_str("%Y-%m-%d")
+        filename = os.path.join(self._root_dir(), f"filtered_signals_{date}.csv")
+        exists = os.path.exists(filename)
+
+        signal = signal or {}
+        analysis_payload: Dict[str, Any] = {}
+        if isinstance(analysis, dict):
+            analysis_payload.update(analysis)
+        if extra:
+            analysis_payload.update({k: v for k, v in extra.items() if k not in analysis_payload})
+
+        fast_ma = signal.get("fast_ma", 0.0)
+        slow_ma = signal.get("slow_ma", 0.0)
+        ma_diff = ((float(fast_ma) / float(slow_ma) - 1) * 100.0) if slow_ma else 0.0
+        candle_filter = signal.get("candle_filter", {}) or {}
+
+        fieldnames = [
+            "timestamp",
+            "symbol",
+            "price",
+            "decision",
+            "skip_reason",
+            "fast_ma",
+            "slow_ma",
+            "ma_diff_pct",
+            "long_signal",
+            "short_signal",
+            "candle_position_ratio",
+            "candle_safe_long",
+            "candle_safe_short",
+            "context",
+        ]
+
+        try:
+            with open(filename, "a", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                if not exists:
+                    writer.writeheader()
+                writer.writerow(
+                    {
+                        "timestamp": ts,
+                        "symbol": symbol,
+                        "price": float(current_price),
+                        "decision": decision or "SKIP",
+                        "skip_reason": skip_reason or analysis_payload.get("skip_reason", ""),
+                        "fast_ma": fast_ma,
+                        "slow_ma": slow_ma,
+                        "ma_diff_pct": round(ma_diff, 3),
+                        "long_signal": bool(signal.get("long", False)),
+                        "short_signal": bool(signal.get("short", False)),
+                        "candle_position_ratio": candle_filter.get("candle_position_ratio", 0.0),
+                        "candle_safe_long": bool(candle_filter.get("candle_safe_long")),
+                        "candle_safe_short": bool(candle_filter.get("candle_safe_short")),
+                        "context": json.dumps(analysis_payload, default=str) if analysis_payload else "",
+                    }
+                )
+        except Exception as exc:
+            print(f"[WARN] filtered signal log failed: {exc}")
+
+    def log_detailed_entry(
+        self,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        qty: float,
+        stop_price: float,
+        risk_multiplier: float,
+        atr_abs: float,
+        sig: Optional[Dict[str, Any]] = None,
+        equity_usdt: Optional[float] = None,
+        reason: str = "signal",
+        reasons_list: Optional[list] = None,
+        **kwargs: Any,
+    ) -> None:
+        ts = self._now_str()
+        date = self._now_str("%Y-%m-%d")
+        filename = os.path.join(self._root_dir(), f"detailed_entries_{date}.csv")
+
+        equity_alias = kwargs.pop("equity", None)
+        signal_payload = sig if sig is not None else kwargs.pop("signal", None)
+        if kwargs:
+            unexpected = ", ".join(kwargs.keys())
+            raise TypeError(f"Unexpected keyword arguments: {unexpected}")
+        if equity_usdt is not None and equity_alias is not None:
+            try:
+                if abs(float(equity_usdt) - float(equity_alias)) > 1e-6:
+                    print(f"[WARN] log_detailed_entry equity mismatch ({equity_usdt} vs {equity_alias})")
+            except Exception:
+                pass
+        equity_value = equity_usdt if equity_usdt is not None else equity_alias
+        if equity_value is None:
+            raise ValueError("equity_usdt or equity must be provided")
+        try:
+            equity_value = float(equity_value)
+        except Exception:
+            raise ValueError("equity must be numeric") from None
+
+        exists = os.path.exists(filename)
+        position_value = float(qty) * float(entry_price)
+        risk_amount = float(qty) * abs(float(entry_price) - float(stop_price))
+        risk_pct = (risk_amount / max(float(equity_value), 1e-9)) * 100.0
+        stop_distance_pct = abs(float(entry_price) - float(stop_price)) / max(float(entry_price), 1e-9) * 100.0
+
+        signal = signal_payload or {}
+        fast_ma = signal.get("fast_ma", 0.0)
+        slow_ma = signal.get("slow_ma", 0.0)
+        ma_diff_pct = ((float(fast_ma) / float(slow_ma) - 1) * 100.0) if slow_ma else 0.0
+        regime = signal.get("regime", "UNKNOWN")
+        reasons_str = "|".join(reasons_list) if reasons_list else ""
+        be_promotion_price = float(entry_price) + (1.5 * float(atr_abs)) if str(side).upper().startswith("LONG") else float(entry_price) - (1.5 * float(atr_abs))
+        expected_trail_range = (
+            f"${entry_price:.0f} ~ ${be_promotion_price + (2.5 * atr_abs):.0f}"
+            if str(side).upper().startswith("LONG")
+            else f"${be_promotion_price - (2.5 * atr_abs):.0f} ~ ${entry_price:.0f}"
+        )
+        entry_logic = (
+            "Trend alignment with reduced risk"
+            if float(risk_multiplier or 1.0) < 1.0
+            else "Trend alignment with full risk"
+        )
+
+        try:
+            with open(filename, "a", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                if not exists:
+                    writer.writerow(
+                        [
+                            "timestamp",
+                            "symbol",
+                            "side",
+                            "entry_price",
+                            "qty",
+                            "position_value_usd",
+                            "stop_price",
+                            "stop_distance_pct",
+                            "risk_amount_usd",
+                            "risk_pct",
+                            "risk_multiplier",
+                            "be_promotion_price",
+                            "expected_trail_range",
+                            "fast_ma",
+                            "slow_ma",
+                            "ma_diff_pct",
+                            "regime",
+                            "atr_abs",
+                            "equity_usdt",
+                            "reason",
+                            "entry_logic",
+                            "reasons",
+                        ]
+                    )
+                writer.writerow(
+                    [
+                        ts,
+                        symbol,
+                        side,
+                        entry_price,
+                        qty,
+                        round(position_value, 2),
+                        stop_price,
+                        round(stop_distance_pct, 3),
+                        round(risk_amount, 2),
+                        round(risk_pct, 2),
+                        float(risk_multiplier or 1.0),
+                        be_promotion_price,
+                        expected_trail_range,
+                        fast_ma,
+                        slow_ma,
+                        round(ma_diff_pct, 3),
+                        regime,
+                        atr_abs,
+                        equity_value,
+                        reason,
+                        entry_logic,
+                        reasons_str,
+                    ]
+                )
+        except Exception as exc:
+            print(f"[WARN] detailed entry log failed: {exc}")
