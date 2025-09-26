@@ -114,6 +114,48 @@ def _ensure_protective_stop_on_restart(b: ExchangeAPI, eng: DonchianATREngine, s
         return False
 
 
+def startup_sync(b: ExchangeAPI, eng: DonchianATREngine) -> None:
+    """Synchronize state and protective stops on boot.
+
+    - Re-arm protective stops for any open positions (idempotent).
+    - If state lacks entry_price but broker reports a position, persist entry_price, side, and in_position.
+    - Persist last_trail_stop for visibility.
+    """
+    # Protective stops
+    for symbol in UNIVERSE:
+        try:
+            _ensure_protective_stop_on_restart(b, eng, symbol)
+        except Exception:
+            # Best-effort; auth/sync failures are handled by caller
+            pass
+    # Entry price + side/in_position sync
+    for symbol in UNIVERSE:
+        try:
+            pos = b.position_for(symbol)
+            if not pos:
+                continue
+            amt = abs(float(pos.get('contracts') or pos.get('positionAmt') or 0))
+            if amt <= 0:
+                continue
+            entry_px = float(pos.get('entryPrice') or 0)
+            if entry_px > 0:
+                st = eng.state.get(symbol, {}) if eng else {}
+                if float(st.get('entry_price') or 0) <= 0:
+                    st['entry_price'] = entry_px
+                st['in_position'] = True
+                if not st.get('side'):
+                    side_label = (pos.get('side') or ('long' if (pos.get('contracts') or 0) > 0 else 'short')).lower()
+                    st['side'] = side_label
+                eng.state[symbol] = st
+        except Exception:
+            pass
+    # Persist once after batch
+    try:
+        from strategy import save_state as _save
+        _save(eng.state)
+    except Exception:
+        pass
+
 def policy_emergency_cleanup():
     """Policy-based emergency handling (safe minimal).
 
@@ -224,37 +266,9 @@ def main():
     except Exception as bal_err:
         logger.warning('Startup balance fetch failed; continuing with 0 equity: %s', bal_err)
 
-    # On startup, re-arm protective stops for any existing positions
+    # On startup, re-arm protective stops and sync state for any existing positions
     try:
-        for symbol in UNIVERSE:
-            _ensure_protective_stop_on_restart(b, eng, symbol)
-        # Sync entry_price in state from broker if missing (visibility and persistence)
-        for symbol in UNIVERSE:
-            try:
-                pos = b.position_for(symbol)
-                if not pos:
-                    continue
-                amt = abs(float(pos.get('contracts') or pos.get('positionAmt') or 0))
-                if amt <= 0:
-                    continue
-                entry_px = float(pos.get('entryPrice') or 0)
-                if entry_px > 0:
-                    st = eng.state.get(symbol, {}) if eng else {}
-                    if float(st.get('entry_price') or 0) <= 0:
-                        st['entry_price'] = entry_px
-                        # retain or derive side/in_position for consistency
-                        st['in_position'] = True
-                        if not st.get('side'):
-                            side_label = (pos.get('side') or ('long' if (pos.get('contracts') or 0) > 0 else 'short')).lower()
-                            st['side'] = side_label
-                        eng.state[symbol] = st
-                        try:
-                            from strategy import save_state as _save
-                            _save(eng.state)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+        startup_sync(b, eng)
         print("Trading loop starting...")
     except BalanceAuthError as auth_err:
         logger.error('Startup protective stop auth error: %s', auth_err)

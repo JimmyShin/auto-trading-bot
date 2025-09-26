@@ -9,6 +9,7 @@ jobs:
   # CI: run tests and gate later stages on success
   tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       # Use bundled small OHLCV fixtures in CI
       BASELINE_OHLCV_DIR: tests/data/ohlcv
@@ -21,8 +22,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: Run pytest
-        run: pytest -q
+      - name: Run fast tests (exclude regression) with durations and timeouts
+        run: |
+          pytest -m "not regression" -vv -ra \
+            --durations=15 --maxfail=1 \
+            --timeout=120
 
   # Build & publish image to GHCR once tests pass
   build_and_publish:

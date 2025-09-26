@@ -8,6 +8,9 @@ import pytest
 from baseline import DEFAULT_BASELINE_PATH, generate_baseline
 from reporter import generate_report
 
+# Mark all tests in this module as regression (slow)
+pytestmark = pytest.mark.regression
+
 
 # --------------------------
 # Fixtures

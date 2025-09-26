@@ -9,6 +9,9 @@ from baseline import DEFAULT_BASELINE_PATH
 from reporter import generate_report
 from backtest.metrics import equity_curve, max_drawdown
 
+# Mark this module as regression (computes equity curve from baseline trades)
+pytestmark = pytest.mark.regression
+
 
 def _extract_trades_from_records(symbol_records: List[Dict[str, Any]]) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []

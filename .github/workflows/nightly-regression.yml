@@ -1,0 +1,29 @@
+name: nightly-regression
+
+on:
+  schedule:
+    # Run daily at 02:00 UTC
+    - cron: '0 2 * * *'
+  push:
+    branches:
+      # Optional: run full regression on pre-release branches
+      - 'release/**'
+      - 'pre-release/**'
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    env:
+      BASELINE_OHLCV_DIR: tests/data/ohlcv
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run full regression suite
+        run: pytest -m regression -q
+

@@ -5,6 +5,9 @@ import pytest
 
 from baseline import DEFAULT_BASELINE_PATH, generate_baseline
 
+# Full baseline regeneration check is regression-level (slow)
+pytestmark = pytest.mark.regression
+
 
 @pytest.mark.parametrize("baseline_path", [DEFAULT_BASELINE_PATH])
 def test_baseline_matches_regenerated(tmp_path, baseline_path: Path) -> None:
@@ -24,4 +27,3 @@ def test_baseline_matches_regenerated(tmp_path, baseline_path: Path) -> None:
     )
 
     assert regenerated["symbols"] == stored["symbols"], "Strategy output diverged from baseline"
-
