@@ -43,7 +43,7 @@ class Reporter:
     # ------------------------------------------------------------------
     # Public logging API
     # ------------------------------------------------------------------
-    def log_trade(self, symbol: str, side: str, entry_price: float, qty: float, reason: str = "signal") -> None:
+    def log_trade(self, symbol: str, side: str, entry_price: float, qty: float, reason: str = "signal", risk_usdt: float | None = None) -> None:
         ts = self._now_str()
         date = self._now_str("%Y-%m-%d")
         filename = os.path.join(self._root_dir(), f"trades_{date}.csv")
@@ -60,6 +60,8 @@ class Reporter:
             "exit_price",
             "pnl_pct",
             "exit_reason",
+            "risk_usdt",
+            "R_multiple",
         ]
 
         row = {
@@ -74,6 +76,8 @@ class Reporter:
             "exit_price": "",
             "pnl_pct": "",
             "exit_reason": "",
+            "risk_usdt": "",
+            "R_multiple": "",
         }
 
         try:
@@ -81,6 +85,11 @@ class Reporter:
                 writer = csv.DictWriter(handle, fieldnames=fieldnames)
                 if not exists or os.path.getsize(filename) == 0:
                     writer.writeheader()
+                if risk_usdt is not None:
+                    try:
+                        row["risk_usdt"] = float(risk_usdt)
+                    except Exception:
+                        row["risk_usdt"] = risk_usdt
                 writer.writerow(row)
         except Exception as exc:
             print(f"[WARN] trade log failed: {exc}")
@@ -101,6 +110,8 @@ class Reporter:
             "exit_price",
             "pnl_pct",
             "exit_reason",
+            "risk_usdt",
+            "R_multiple",
         ]
 
         try:
@@ -136,6 +147,18 @@ class Reporter:
             found = False
             for row in reversed(rows):
                 if row.get("symbol") == symbol and row.get("status", "").upper() == "OPEN":
+                    # Compute R-multiple if risk_usdt and qty/entry present
+                    try:
+                        entry_price = float(row.get("entry_price") or 0.0)
+                        qty = float(row.get("qty") or 0.0)
+                        risk_usdt = float(row.get("risk_usdt") or 0.0)
+                        if qty > 0 and entry_price > 0:
+                            pnl_usdt = (float(exit_price) - entry_price) * qty if (str(side).lower() == "long") else (entry_price - float(exit_price)) * qty
+                        else:
+                            pnl_usdt = 0.0
+                        r_mult = (pnl_usdt / risk_usdt) if risk_usdt and risk_usdt != 0 else ""
+                    except Exception:
+                        r_mult = ""
                     row.update(
                         {
                             "status": "CLOSED",
@@ -143,6 +166,7 @@ class Reporter:
                             "exit_price": exit_price,
                             "pnl_pct": pnl_pct,
                             "exit_reason": reason,
+                            "R_multiple": r_mult,
                         }
                     )
                     found = True
@@ -679,6 +703,14 @@ def generate_report(trades: Any, config: Optional[Dict[str, Any]] = None) -> pd.
     by_side = _group_metrics_by_side(df)
 
     # Compose final single-row DataFrame
+    # Avg R-multiple if provided on input; else fallback to expectancy
+    avg_r_multiple = 0.0
+    if "R_multiple" in df.columns:
+        try:
+            avg_r_multiple = float(pd.to_numeric(df["R_multiple"], errors="coerce").dropna().mean())
+        except Exception:
+            avg_r_multiple = 0.0
+
     data: Dict[str, Any] = {
         "total_trades": total,
         "wins": wins,
@@ -688,6 +720,7 @@ def generate_report(trades: Any, config: Optional[Dict[str, Any]] = None) -> pd.
         "avg_loss": avg_loss,
         "payoff_ratio": payoff_ratio,
         "expectancy": expectancy,
+        "avg_r": (avg_r_multiple if avg_r_multiple != 0.0 else expectancy),
         "mdd": mdd,
         "profit_factor": profit_factor,
         "sharpe": sharpe,

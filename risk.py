@@ -142,6 +142,8 @@ class RiskManager:
         side: str,
         entry_px: float,
         qty: float = 0,
+        entry_stop_price: Optional[float] = None,
+        risk_usdt: float = 0.0,
     ) -> Dict[str, Any]:
         symbol_state = self.state.get(symbol, {})
         symbol_state.update(
@@ -157,6 +159,15 @@ class RiskManager:
                 "pyramid_locked_limit": {},
             }
         )
+        if entry_stop_price is not None:
+            try:
+                symbol_state["entry_stop_price"] = float(entry_stop_price)
+            except Exception:
+                pass
+        try:
+            symbol_state["risk_usdt"] = float(risk_usdt or 0.0)
+        except Exception:
+            symbol_state["risk_usdt"] = 0.0
         self.state[symbol] = symbol_state
         return symbol_state
 

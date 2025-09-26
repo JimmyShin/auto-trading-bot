@@ -14,7 +14,7 @@ from exchange_api import ExchangeAPI, BalanceAuthError, BalanceSyncError
 from strategy import DonchianATREngine
 from indicators import atr, is_near_funding
 from reporter import Reporter
-from alerts import slack_notify_safely
+from alerts import slack_notify_safely, slack_notify_exit
 
 try:
     from scripts.daily_report import generate_report as _gen_daily_report
@@ -492,16 +492,18 @@ def main():
                             eff_qty = float(order.get('amount', qty) or qty)
                             if side_order == 'buy':
                                 b.create_stop_market_safe(symbol, 'sell', stop_price, eff_qty, reduce_only=True)
-                                eng.update_symbol_state_on_entry(symbol, 'long', close, eff_qty)
-                                log_trade(symbol, 'LONG', close, eff_qty, 'MA_CROSS')
+                                risk_usdt = abs(close - stop_price) * eff_qty
+                                eng.update_symbol_state_on_entry(symbol, 'long', close, eff_qty, entry_stop_price=stop_price, risk_usdt=risk_usdt)
+                                log_trade(symbol, 'LONG', close, eff_qty, 'MA_CROSS', risk_usdt=risk_usdt)
                                 try:
                                     log_detailed_entry(symbol, 'LONG', close, eff_qty, stop_price, plan.get('risk_multiplier', 1.0), atr_abs, plan.get('signal', {}), eq, 'MA_ALIGNMENT', plan.get('reasons'))
                                 except Exception:
                                     pass
                             else:
                                 b.create_stop_market_safe(symbol, 'buy', stop_price, eff_qty, reduce_only=True)
-                                eng.update_symbol_state_on_entry(symbol, 'short', close, eff_qty)
-                                log_trade(symbol, 'SHORT', close, eff_qty, 'MA_CROSS')
+                                risk_usdt = abs(stop_price - close) * eff_qty
+                                eng.update_symbol_state_on_entry(symbol, 'short', close, eff_qty, entry_stop_price=stop_price, risk_usdt=risk_usdt)
+                                log_trade(symbol, 'SHORT', close, eff_qty, 'MA_CROSS', risk_usdt=risk_usdt)
                                 try:
                                     log_detailed_entry(symbol, 'SHORT', close, eff_qty, stop_price, plan.get('risk_multiplier', 1.0), atr_abs, plan.get('signal', {}), eq, 'MA_ALIGNMENT', plan.get('reasons'))
                                 except Exception:
@@ -549,6 +551,26 @@ def main():
                                     print(f"[EXIT] {symbol} position closed {pnl_pct:+.2f}%")
                             except Exception as _se:
                                 print(f"[WARN] state update after exit failed {symbol}: {_se}")
+                            # Slack notification for EXIT only
+                            try:
+                                # Use qty from state if available to estimate PnL in USDT
+                                st_after = eng.state.get(symbol, {}) if eng else {}
+                                qty = float(st_after.get('original_qty') or st_state.get('original_qty') or 0.0)
+                                if qty > 0 and entry_px > 0 and exit_price_used > 0:
+                                    if side_state == 'long':
+                                        pnl_usdt = (exit_price_used - entry_px) * qty
+                                    else:
+                                        pnl_usdt = (entry_px - exit_price_used) * qty
+                                else:
+                                    pnl_usdt = 0.0
+                                # Current equity for context
+                                try:
+                                    equity_now = float(b.get_equity_usdt())
+                                except Exception:
+                                    equity_now = 0.0
+                                slack_notify_exit(symbol, side_state, entry_px, exit_price_used, qty, float(pnl_usdt), float(pnl_pct), equity_now)
+                            except Exception:
+                                pass
                             # Update daily report
                             try:
                                 if _gen_daily_report:

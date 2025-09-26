@@ -295,8 +295,8 @@ class DonchianATREngine:
         """Return the ATR-based trailing stop for the active position."""
         return self._risk.trail_stop_price(side, entry_price, last_price, atr_abs, be_promoted)
 
-    def update_symbol_state_on_entry(self, symbol: str, side: str, entry_px: float, qty: float = 0):
-        state = self._risk.update_symbol_state_on_entry(symbol, side, entry_px, qty)
+    def update_symbol_state_on_entry(self, symbol: str, side: str, entry_px: float, qty: float = 0, entry_stop_price: float | None = None, risk_usdt: float = 0.0):
+        state = self._risk.update_symbol_state_on_entry(symbol, side, entry_px, qty, entry_stop_price, risk_usdt)
         self._save_state()
         return state
 
