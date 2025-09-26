@@ -17,6 +17,13 @@ __pycache__/
 .pytest_cache/
 .coverage*
 
+# Virtualenvs / Python tools
+.venv/
+venv/
+.python-version
+.mypy_cache/
+.ruff_cache/
+
 # Editors/OS
 .vscode/
 .idea/
@@ -25,6 +32,11 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Temp/backup files
+*.bak
+*~
+*_tmp.py
 
 # Local config (use config.example.json)
 config.json

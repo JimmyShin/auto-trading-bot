@@ -13,6 +13,9 @@ import pandas as pd
 
 __all__ = ["Reporter", "generate_report", "save_report"]
 
+# RAW trades CSV schema version (append-only schema). Bump on column changes.
+SCHEMA_VERSION = 4
+
 
 class Reporter:
     """Handles structured CSV logging for trading activity and diagnostics."""
@@ -43,42 +46,111 @@ class Reporter:
     # ------------------------------------------------------------------
     # Public logging API
     # ------------------------------------------------------------------
-    def log_trade(self, symbol: str, side: str, entry_price: float, qty: float, reason: str = "signal", risk_usdt: float | None = None) -> None:
-        ts = self._now_str()
-        date = self._now_str("%Y-%m-%d")
-        filename = os.path.join(self._root_dir(), f"trades_{date}.csv")
-        exists = os.path.exists(filename)
-        fieldnames = [
-            "timestamp",
+    def _trade_fieldnames(self):
+        return [
+            # Schema / identity
+            "schema_version",
+            # Entry snapshot
+            "timestamp",      # legacy alias
+            "entry_ts_utc",
             "symbol",
             "side",
+            "timeframe",
+            "leverage",
             "entry_price",
             "qty",
             "reason",
+            # Risk snapshot
+            "entry_atr_abs",
+            "atr_period",
+            "atr_source",
+            "stop_basis",
+            "stop_k",
+            "fallback_pct",
+            "stop_distance",
+            "risk_usdt_planned",
+            # Lifecycle
             "status",
-            "exit_timestamp",
+            "exit_timestamp",   # legacy alias
+            "exit_ts_utc",
             "exit_price",
             "pnl_pct",
             "exit_reason",
+            # Ex-post
+            "fees_quote_actual",
+            "pnl_quote_expost",
+            "R_atr_expost",
+            "R_usd_expost",
+            # Legacy compat
             "risk_usdt",
             "R_multiple",
         ]
 
-        row = {
-            "timestamp": ts,
-            "symbol": symbol,
-            "side": side,
-            "entry_price": entry_price,
-            "qty": qty,
-            "reason": reason,
-            "status": "OPEN",
-            "exit_timestamp": "",
-            "exit_price": "",
-            "pnl_pct": "",
-            "exit_reason": "",
-            "risk_usdt": "",
-            "R_multiple": "",
-        }
+    def log_trade(
+        self,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        qty: float,
+        reason: str = "signal",
+        risk_usdt: float | None = None,
+        *,
+        timeframe: Optional[str] = None,
+        leverage: Optional[float] = None,
+        entry_atr_abs: Optional[float] = None,
+        atr_period: Optional[int] = None,
+        atr_source: Optional[str] = None,
+        stop_basis: Optional[str] = None,
+        stop_k: Optional[float] = None,
+        fallback_pct: Optional[float] = None,
+        stop_distance: Optional[float] = None,
+        risk_usdt_planned: Optional[float] = None,
+    ) -> None:
+        ts = self._now_str()
+        date = self._now_str("%Y-%m-%d")
+        filename = os.path.join(self._root_dir(), f"trades_{date}.csv")
+        exists = os.path.exists(filename)
+        fieldnames = self._trade_fieldnames()
+
+        row: Dict[str, Any] = {k: "" for k in fieldnames}
+        row.update(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "timestamp": ts,
+                "entry_ts_utc": ts,
+                "symbol": symbol,
+                "side": side,
+                "timeframe": timeframe or "",
+                "leverage": leverage if leverage is not None else "",
+                "entry_price": entry_price,
+                "qty": qty,
+                "reason": reason,
+                # snapshot
+                "entry_atr_abs": entry_atr_abs if entry_atr_abs is not None else "",
+                "atr_period": atr_period if atr_period is not None else "",
+                "atr_source": atr_source or "",
+                "stop_basis": (stop_basis or "").lower() if stop_basis else "",
+                "stop_k": stop_k if stop_k is not None else "",
+                "fallback_pct": fallback_pct if fallback_pct is not None else "",
+                "stop_distance": stop_distance if stop_distance is not None else "",
+                "risk_usdt_planned": risk_usdt_planned if risk_usdt_planned is not None else "",
+                # lifecycle
+                "status": "OPEN",
+                "exit_timestamp": "",
+                "exit_ts_utc": "",
+                "exit_price": "",
+                "pnl_pct": "",
+                "exit_reason": "",
+                # ex-post (empty at entry)
+                "fees_quote_actual": "",
+                "pnl_quote_expost": "",
+                "R_atr_expost": "",
+                "R_usd_expost": "",
+                # legacy
+                "risk_usdt": "",
+                "R_multiple": "",
+            }
+        )
 
         try:
             with open(filename, "a", encoding="utf-8", newline="") as handle:
@@ -94,25 +166,11 @@ class Reporter:
         except Exception as exc:
             print(f"[WARN] trade log failed: {exc}")
 
-    def log_exit(self, symbol: str, side: str, exit_price: float, pnl_pct: float, reason: str = "exit") -> None:
+    def log_exit(self, symbol: str, side: str, exit_price: float, pnl_pct: float, reason: str = "exit", *, fees_quote_actual: Optional[float] = None) -> None:
         ts = self._now_str()
         date = self._now_str("%Y-%m-%d")
         filename = os.path.join(self._root_dir(), f"trades_{date}.csv")
-        fieldnames = [
-            "timestamp",
-            "symbol",
-            "side",
-            "entry_price",
-            "qty",
-            "reason",
-            "status",
-            "exit_timestamp",
-            "exit_price",
-            "pnl_pct",
-            "exit_reason",
-            "risk_usdt",
-            "R_multiple",
-        ]
+        fieldnames = self._trade_fieldnames()
 
         try:
             if not os.path.exists(filename):
@@ -121,17 +179,17 @@ class Reporter:
                     writer.writeheader()
                     writer.writerow(
                         {
+                            "schema_version": SCHEMA_VERSION,
                             "timestamp": ts,
+                            "entry_ts_utc": "",
                             "symbol": symbol,
                             "side": side,
                             "status": "CLOSED",
                             "exit_timestamp": ts,
+                            "exit_ts_utc": ts,
                             "exit_price": exit_price,
                             "pnl_pct": pnl_pct,
                             "exit_reason": reason,
-                            "entry_price": "",
-                            "qty": "",
-                            "reason": "",
                         }
                     )
                 return
@@ -140,6 +198,7 @@ class Reporter:
             with open(filename, "r", encoding="utf-8", newline="") as handle:
                 reader = csv.DictReader(handle)
                 for row in reader:
+                    # ensure new schema keys exist
                     for field in fieldnames:
                         row.setdefault(field, "")
                     rows.append(row)
@@ -147,26 +206,51 @@ class Reporter:
             found = False
             for row in reversed(rows):
                 if row.get("symbol") == symbol and row.get("status", "").upper() == "OPEN":
-                    # Compute R-multiple if risk_usdt and qty/entry present
+                    # compute ex-post metrics
                     try:
                         entry_price = float(row.get("entry_price") or 0.0)
                         qty = float(row.get("qty") or 0.0)
-                        risk_usdt = float(row.get("risk_usdt") or 0.0)
-                        if qty > 0 and entry_price > 0:
-                            pnl_usdt = (float(exit_price) - entry_price) * qty if (str(side).lower() == "long") else (entry_price - float(exit_price)) * qty
-                        else:
-                            pnl_usdt = 0.0
-                        r_mult = (pnl_usdt / risk_usdt) if risk_usdt and risk_usdt != 0 else ""
+                        pnl_dist = (float(exit_price) - entry_price) if (str(side).lower() == "long") else (entry_price - float(exit_price))
+                        gross_pnl_quote = pnl_dist * qty if (qty > 0) else 0.0
                     except Exception:
-                        r_mult = ""
+                        pnl_dist, gross_pnl_quote = 0.0, 0.0
+
+                    try:
+                        stop_k = float(row.get("stop_k") or 0.0)
+                    except Exception:
+                        stop_k = 0.0
+                    try:
+                        entry_atr_abs = float(row.get("entry_atr_abs") or 0.0)
+                    except Exception:
+                        entry_atr_abs = 0.0
+                    try:
+                        risk_usdt_planned = float(row.get("risk_usdt_planned") or (row.get("risk_usdt") or 0.0) or 0.0)
+                    except Exception:
+                        risk_usdt_planned = 0.0
+                    try:
+                        fees = float(fees_quote_actual) if fees_quote_actual is not None else float(row.get("fees_quote_actual") or 0.0)
+                    except Exception:
+                        fees = 0.0
+
+                    pnl_quote_expost = gross_pnl_quote - fees
+                    denom_atr = stop_k * entry_atr_abs
+                    r_atr = (pnl_dist / denom_atr) if denom_atr not in (0, 0.0) else ""
+                    r_usd = (pnl_quote_expost / risk_usdt_planned) if risk_usdt_planned not in (0, 0.0) else ""
+
                     row.update(
                         {
                             "status": "CLOSED",
                             "exit_timestamp": ts,
+                            "exit_ts_utc": ts,
                             "exit_price": exit_price,
                             "pnl_pct": pnl_pct,
                             "exit_reason": reason,
-                            "R_multiple": r_mult,
+                            "fees_quote_actual": fees if fees != 0 else (row.get("fees_quote_actual") or ""),
+                            "pnl_quote_expost": pnl_quote_expost if pnl_quote_expost != 0 else (row.get("pnl_quote_expost") or ""),
+                            "R_atr_expost": r_atr,
+                            "R_usd_expost": r_usd,
+                            # legacy convenience
+                            "R_multiple": r_atr,
                         }
                     )
                     found = True
@@ -175,7 +259,9 @@ class Reporter:
             if not found:
                 rows.append(
                     {
+                        "schema_version": SCHEMA_VERSION,
                         "timestamp": ts,
+                        "entry_ts_utc": "",
                         "symbol": symbol,
                         "side": side,
                         "entry_price": "",
@@ -183,6 +269,7 @@ class Reporter:
                         "reason": "",
                         "status": "CLOSED",
                         "exit_timestamp": ts,
+                        "exit_ts_utc": ts,
                         "exit_price": exit_price,
                         "pnl_pct": pnl_pct,
                         "exit_reason": reason,
@@ -645,36 +732,40 @@ def _group_metrics_by_side(df: pd.DataFrame) -> Dict[str, float]:
 
 
 def generate_report(trades: Any, config: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
-    """Generate a single-row DataFrame of performance metrics.
+    """Generate metrics without substituting Avg R.
 
-    Metrics:
-    - total_trades: count
-    - win_rate: wins / total
-    - payoff_ratio: avg(win) / abs(avg(loss))
-    - expectancy: (win_rate*avg(win)) - (loss_rate*avg(loss))
-    - mdd: max drawdown ratio based on equity curve from returns
-    - profit_factor: gross profit / gross loss
-    - sharpe: mean(returns)/std(returns) (no annualization)
-    - max_win_streak / max_loss_streak: consecutive positives/negatives
-    - avg_hold_time_sec: mean(exit_ts - entry_ts) in seconds (ignored if timestamps missing)
-    - long/short prefixed metrics via groupby(side)
-
-    Notes:
-    - Returns are computed from entry/exit if available, otherwise from pnl_pct (auto-scaled).
-    - All rates are expressed as ratios (e.g., 0.52 for 52%).
+    - avg_r_atr: mean of R_atr_expost (if present)
+    - avg_r_usd: mean of R_usd_expost (if present)
+    - win_rate: fraction of trades with positive pnl_quote_expost
+    - expectancy_usd: win_rate*avg_win_usd - (1-win_rate)*avg_loss_usd
     """
     df = _coerce_trades(trades)
-    r = df["return"].astype(float).fillna(0.0)
 
-    total = int(len(r))
-    wins = int((r > 0).sum())
-    losses = int((r <= 0).sum())
+    r_atr_series = pd.to_numeric(df.get("R_atr_expost", pd.Series(dtype=float)), errors="coerce")
+    r_usd_series = pd.to_numeric(df.get("R_usd_expost", pd.Series(dtype=float)), errors="coerce")
+    pnl_usd = pd.to_numeric(df.get("pnl_quote_expost", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+
+    total = int(len(df))
+    wins = int((pnl_usd > 0).sum())
+    losses = int((pnl_usd <= 0).sum())
     win_rate = (wins / total) if total else 0.0
-    loss_rate = 1 - win_rate if total else 0.0
-    avg_win = float(r[r > 0].mean()) if wins > 0 else 0.0
-    avg_loss = float(abs(r[r <= 0].mean())) if losses > 0 else 0.0
-    payoff_ratio = (avg_win / avg_loss) if avg_loss > 0 else (math.inf if avg_win > 0 else 0.0)
-    expectancy = (win_rate * avg_win) - (loss_rate * avg_loss)
+
+    avg_win_usd = float(pnl_usd[pnl_usd > 0].mean()) if wins > 0 else 0.0
+    avg_loss_usd = float(abs(pnl_usd[pnl_usd <= 0].mean())) if losses > 0 else 0.0
+    expectancy_usd = (win_rate * avg_win_usd) - ((1 - win_rate) * avg_loss_usd)
+
+    avg_r_atr = float(r_atr_series.dropna().mean()) if not r_atr_series.dropna().empty else float("nan")
+    avg_r_usd = float(r_usd_series.dropna().mean()) if not r_usd_series.dropna().empty else float("nan")
+
+    # Retain legacy return-based helpers
+    r = df["return"].astype(float).fillna(0.0)
+    payoff_ratio = 0.0
+    try:
+        avg_win = float(r[r > 0].mean()) if (r > 0).any() else 0.0
+        avg_loss = float(abs(r[r <= 0].mean())) if (r <= 0).any() else 0.0
+        payoff_ratio = (avg_win / avg_loss) if avg_loss > 0 else (math.inf if avg_win > 0 else 0.0)
+    except Exception:
+        payoff_ratio = 0.0
 
     gross_win = float(r[r > 0].sum())
     gross_loss = float(abs(r[r <= 0].sum()))
@@ -689,46 +780,37 @@ def generate_report(trades: Any, config: Optional[Dict[str, Any]] = None) -> pd.
     mdd = _max_drawdown_from_returns(r)
     max_win_streak, max_loss_streak = _streaks(r)
 
-    # Average holding time in seconds (only when both timestamps are present)
-    hold_secs = None
+    avg_hold_time_sec = 0.0
     if "entry_ts" in df.columns and "exit_ts" in df.columns:
         mask = df["entry_ts"].notna() & df["exit_ts"].notna()
         if mask.any():
             dt = (df.loc[mask, "exit_ts"] - df.loc[mask, "entry_ts"]).dropna()
             if not dt.empty:
-                hold_secs = float(dt.dt.total_seconds().mean())
-    avg_hold_time_sec = hold_secs if hold_secs is not None else 0.0
+                avg_hold_time_sec = float(dt.dt.total_seconds().mean())
 
-    # Group-by side metrics
-    by_side = _group_metrics_by_side(df)
-
-    # Compose final single-row DataFrame
-    # Avg R-multiple if provided on input; else fallback to expectancy
-    avg_r_multiple = 0.0
-    if "R_multiple" in df.columns:
-        try:
-            avg_r_multiple = float(pd.to_numeric(df["R_multiple"], errors="coerce").dropna().mean())
-        except Exception:
-            avg_r_multiple = 0.0
+    stop_basis = (df.get("stop_basis") or pd.Series(dtype=str)).astype(str).str.lower()
+    percent_count = int((stop_basis == "percent").sum()) if len(stop_basis) else 0
 
     data: Dict[str, Any] = {
         "total_trades": total,
         "wins": wins,
         "losses": losses,
         "win_rate": win_rate,
-        "avg_win": avg_win,
-        "avg_loss": avg_loss,
+        "avg_win_usd": avg_win_usd,
+        "avg_loss_usd": avg_loss_usd,
+        "expectancy_usd": expectancy_usd,
+        "avg_r_atr": avg_r_atr,
+        "avg_r_usd": avg_r_usd,
         "payoff_ratio": payoff_ratio,
-        "expectancy": expectancy,
-        "avg_r": (avg_r_multiple if avg_r_multiple != 0.0 else expectancy),
         "mdd": mdd,
         "profit_factor": profit_factor,
         "sharpe": sharpe,
         "max_win_streak": max_win_streak,
         "max_loss_streak": max_loss_streak,
         "avg_hold_time_sec": avg_hold_time_sec,
+        "fallback_percent_count": percent_count,
     }
-    data.update(by_side)
+    data.update(_group_metrics_by_side(df))
 
     return pd.DataFrame([data])
 

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import json
@@ -28,7 +28,6 @@ class SlackNotifier:
             resp = requests.post(self.webhook_url, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=5)
             return 200 <= resp.status_code < 300
         except Exception as e:
-            # Do not raise; caller must not crash bot on alert failure
             try:
                 print(f"[WARN] Slack notify failed: {e}")
             except Exception:
@@ -47,15 +46,15 @@ def _get_notifier() -> SlackNotifier:
 
 
 def slack_notify_safely(message: str) -> bool:
-    """Send a Slack message if configured. Never raises; returns True on success."""
     n = _get_notifier()
     return n.send(message)
 
 
 def _collect_closed_trades(base_dir: str, env: str) -> List[Dict[str, Any]]:
-    """Collect closed trades across data/<env>/trades_*.csv into simple dict rows.
+    """Collect closed trades across data/<env>/trades_*.csv.
 
-    Each row includes side, entry (float), exit (float). Ignores incomplete rows.
+    Returns rows with side, entry_price, exit_price, qty, R_atr_expost, R_usd_expost,
+    pnl_quote_expost, stop_basis, exit_ts_utc. Ignores incomplete rows.
     """
     root = os.path.join(base_dir, env)
     patterns = [os.path.join(root, "trades_*.csv")]
@@ -73,41 +72,82 @@ def _collect_closed_trades(base_dir: str, env: str) -> List[Dict[str, Any]]:
                     try:
                         entry = float(row.get("entry_price") or 0.0)
                         exitp = float(row.get("exit_price") or 0.0)
+                        qty = float(row.get("qty") or 0.0)
                     except Exception:
                         continue
                     if entry <= 0 or exitp <= 0:
                         continue
                     side = (row.get("side") or "").strip().lower()
-                    try:
-                        r_mult = row.get("R_multiple")
-                        r_mult_val = float(r_mult) if r_mult not in ("", None) else None
-                    except Exception:
-                        r_mult_val = None
-                    out.append({"side": side, "entry": entry, "exit": exitp, "R_multiple": r_mult_val})
+                    def _fnum(x):
+                        try:
+                            return float(x)
+                        except Exception:
+                            return None
+                    out.append({
+                        "side": side,
+                        "entry_price": entry,
+                        "exit_price": exitp,
+                        "qty": qty,
+                        "R_atr_expost": _fnum(row.get("R_atr_expost")),
+                        "R_usd_expost": _fnum(row.get("R_usd_expost")),
+                        "pnl_quote_expost": _fnum(row.get("pnl_quote_expost")),
+                        "stop_basis": (row.get("stop_basis") or "").strip().lower(),
+                        "exit_ts_utc": row.get("exit_ts_utc") or row.get("exit_timestamp") or "",
+                    })
         except Exception:
             continue
     return out
 
 
-def _winrate_and_expectancy_from_logs(base_dir: str, env: str) -> Dict[str, float]:
+def _rolling_metrics_from_logs(base_dir: str, env: str, window: int = 30) -> Dict[str, Any]:
     try:
         rows = _collect_closed_trades(base_dir, env)
         if not rows:
-            return {"win_rate_pct": 0.0, "avg_r": 0.0}
-        # Use reporter to compute metrics from trades
+            return {
+                "win_rate_pct": 0.0,
+                "avg_r_atr": None,
+                "avg_r_usd": None,
+                "expectancy_usd": 0.0,
+                "fallback_percent_count": 0,
+                "N": 0,
+            }
+        import pandas as pd
+        from reporter import generate_report
+        df = pd.DataFrame(rows)
         try:
-            import pandas as pd  # lazy import
-            from reporter import generate_report
-            df = pd.DataFrame(rows)
-            rep = generate_report(df).iloc[0]
-            win_rate_pct = float(rep.get("win_rate", 0.0)) * 100.0
-            # Prefer true Avg R if provided; fallback to expectancy
-            avg_r = float(rep.get("avg_r", 0.0))
-            return {"win_rate_pct": win_rate_pct, "avg_r": avg_r}
+            if "exit_ts_utc" in df.columns:
+                df = df.sort_values(by="exit_ts_utc")
         except Exception:
-            return {"win_rate_pct": 0.0, "avg_r": 0.0}
+            pass
+        dfw = df.tail(window)
+        rep = generate_report(dfw).iloc[0]
+        win_rate_pct = float(rep.get("win_rate", 0.0)) * 100.0
+        avg_r_atr = rep.get("avg_r_atr")
+        avg_r_usd = rep.get("avg_r_usd")
+        expectancy_usd = rep.get("expectancy_usd", 0.0)
+        fallback_count = int(rep.get("fallback_percent_count", 0))
+        def _nan_to_none(v):
+            try:
+                return None if (isinstance(v, float) and v != v) else v
+            except Exception:
+                return v
+        return {
+            "win_rate_pct": float(win_rate_pct),
+            "avg_r_atr": _nan_to_none(avg_r_atr),
+            "avg_r_usd": _nan_to_none(avg_r_usd),
+            "expectancy_usd": float(expectancy_usd) if expectancy_usd is not None else 0.0,
+            "fallback_percent_count": fallback_count,
+            "N": int(len(dfw)),
+        }
     except Exception:
-        return {"win_rate_pct": 0.0, "avg_r": 0.0}
+        return {
+            "win_rate_pct": 0.0,
+            "avg_r_atr": None,
+            "avg_r_usd": None,
+            "expectancy_usd": 0.0,
+            "fallback_percent_count": 0,
+            "N": 0,
+        }
 
 
 def slack_notify_exit(
@@ -120,10 +160,9 @@ def slack_notify_exit(
     pnl_pct: float,
     equity_usdt: float,
 ) -> bool:
-    """Send a richly formatted Slack message about a position exit.
+    """Send a Slack message about a position exit.
 
-    Pulls cumulative win rate and average R (expectancy) from recent trade logs.
-    Returns True on successful post, False otherwise. Never raises.
+    Uses rolling (N=30) metrics. Avg R shows ATR-based only; no fallbacks.
     """
     try:
         import config as cfg
@@ -133,17 +172,22 @@ def slack_notify_exit(
         env = "testnet"
         base_dir = "data"
 
-    metrics = _winrate_and_expectancy_from_logs(base_dir, env)
+    metrics = _rolling_metrics_from_logs(base_dir, env, window=30)
     win_rate_pct = metrics.get("win_rate_pct", 0.0)
-    avg_r = metrics.get("avg_r", 0.0)
+    avg_r_atr = metrics.get("avg_r_atr", None)
+    expectancy_usd = metrics.get("expectancy_usd", 0.0)
+    fallback_count = int(metrics.get("fallback_percent_count", 0))
+    N = int(metrics.get("N", 0))
 
-    # Compose message
     side_disp = (side or "").upper()
+    avg_r_text = "N/A" if (avg_r_atr is None or (isinstance(avg_r_atr, float) and avg_r_atr != avg_r_atr)) else f"{float(avg_r_atr):.3f}"
+    dd_text = "N/A"  # daily drawdown not provided here
     msg = (
-        f"💥 EXIT {symbol} {side_disp}\n"
-        f"Entry: {entry_price:.4f} → Exit: {exit_price:.4f}\n"
+        f":white_check_mark: EXIT {symbol} {side_disp}\n"
+        f"Entry: {entry_price:.4f} -> Exit: {exit_price:.4f}\n"
         f"PnL: {pnl_usdt:.2f} USDT ({pnl_pct:.2f}%)\n"
-        f"Win rate: {win_rate_pct:.2f}% | Avg R: {avg_r:.3f}\n"
-        f"Equity: ${equity_usdt:,.2f}"
+        f"Win rate(30): {win_rate_pct:.2f}% | Avg R: {avg_r_text} | Exp(USD 30): {float(expectancy_usd):.2f}\n"
+        f"Equity: ${equity_usdt:,.2f} | DD: {dd_text}\n"
+        f"fallback_trades_30: {fallback_count}/{N}"
     )
     return slack_notify_safely(msg)
