@@ -84,14 +84,17 @@ def _collect_closed_trades(base_dir: str, env: str) -> List[Dict[str, Any]]:
                         except Exception:
                             return None
                     out.append({
+                        "symbol": row.get("symbol") or "",
                         "side": side,
                         "entry_price": entry,
                         "exit_price": exitp,
                         "qty": qty,
+                        "entry_atr_abs": _fnum(row.get("entry_atr_abs")),
+                        "stop_k": _fnum(row.get("stop_k")),
+                        "stop_basis": (row.get("stop_basis") or "").strip().lower(),
                         "R_atr_expost": _fnum(row.get("R_atr_expost")),
                         "R_usd_expost": _fnum(row.get("R_usd_expost")),
                         "pnl_quote_expost": _fnum(row.get("pnl_quote_expost")),
-                        "stop_basis": (row.get("stop_basis") or "").strip().lower(),
                         "exit_ts_utc": row.get("exit_ts_utc") or row.get("exit_timestamp") or "",
                     })
         except Exception:
@@ -99,9 +102,10 @@ def _collect_closed_trades(base_dir: str, env: str) -> List[Dict[str, Any]]:
     return out
 
 
-def _rolling_metrics_from_logs(base_dir: str, env: str, window: int = 30) -> Dict[str, Any]:
+def _rolling_metrics_from_logs(base_dir: str, env: str, window: int = 30, rows: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     try:
-        rows = _collect_closed_trades(base_dir, env)
+        if rows is None:
+            rows = _collect_closed_trades(base_dir, env)
         if not rows:
             return {
                 "win_rate_pct": 0.0,
@@ -150,6 +154,33 @@ def _rolling_metrics_from_logs(base_dir: str, env: str, window: int = 30) -> Dic
         }
 
 
+def _compute_latest_r_atr(symbol: str, side: str, entry_price: float, exit_price: float, rows: List[Dict[str, Any]]) -> Optional[float]:
+    """Compute immediate R_atr using latest trade snapshot for the symbol."""
+    if not rows:
+        return None
+    symbol = (symbol or "").strip()
+    side_norm = (side or "").strip().lower()
+    symbol_norm = symbol.upper()
+    for row in reversed(rows):
+        if (row.get("symbol") or "").upper() != symbol_norm:
+            continue
+        if (row.get("side") or "").lower() != side_norm:
+            continue
+        entry_atr = row.get("entry_atr_abs")
+        stop_k = row.get("stop_k")
+        if entry_atr in (None, 0, 0.0) or stop_k in (None, 0, 0.0):
+            continue
+        denom = float(stop_k) * float(entry_atr)
+        if denom == 0:
+            continue
+        if side_norm == "long":
+            pnl_distance = float(exit_price) - float(entry_price)
+        else:
+            pnl_distance = float(entry_price) - float(exit_price)
+        return pnl_distance / denom
+    return None
+
+
 def slack_notify_exit(
     symbol: str,
     side: str,
@@ -172,7 +203,8 @@ def slack_notify_exit(
         env = "testnet"
         base_dir = "data"
 
-    metrics = _rolling_metrics_from_logs(base_dir, env, window=30)
+    rows = _collect_closed_trades(base_dir, env)
+    metrics = _rolling_metrics_from_logs(base_dir, env, window=30, rows=rows)
     win_rate_pct = metrics.get("win_rate_pct", 0.0)
     avg_r_atr = metrics.get("avg_r_atr", None)
     expectancy_usd = metrics.get("expectancy_usd", 0.0)
@@ -180,7 +212,15 @@ def slack_notify_exit(
     N = int(metrics.get("N", 0))
 
     side_disp = (side or "").upper()
-    avg_r_text = "N/A" if (avg_r_atr is None or (isinstance(avg_r_atr, float) and avg_r_atr != avg_r_atr)) else f"{float(avg_r_atr):.3f}"
+    computed_r = _compute_latest_r_atr(symbol, side, entry_price, exit_price, rows)
+    use_direct_r = (avg_r_atr is None or (isinstance(avg_r_atr, float) and avg_r_atr != avg_r_atr)) or N <= 1
+    if use_direct_r and computed_r is not None:
+        avg_r_value = computed_r
+    else:
+        avg_r_value = avg_r_atr if avg_r_atr is not None else computed_r
+    avg_r_text = "N/A"
+    if avg_r_value is not None and not (isinstance(avg_r_value, float) and avg_r_value != avg_r_value):
+        avg_r_text = f"{float(avg_r_value):.3f}"
     dd_text = "N/A"  # daily drawdown not provided here
     msg = (
         f":white_check_mark: EXIT {symbol} {side_disp}\n"

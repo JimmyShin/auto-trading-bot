@@ -743,26 +743,35 @@ def generate_report(trades: Any, config: Optional[Dict[str, Any]] = None) -> pd.
 
     r_atr_series = pd.to_numeric(df.get("R_atr_expost", pd.Series(dtype=float)), errors="coerce")
     r_usd_series = pd.to_numeric(df.get("R_usd_expost", pd.Series(dtype=float)), errors="coerce")
-    pnl_usd = pd.to_numeric(df.get("pnl_quote_expost", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+    pnl_usd = pd.to_numeric(df.get("pnl_quote_expost", pd.Series(dtype=float)), errors="coerce").fillna(pd.NA)
 
-    total = int(len(df))
-    wins = int((pnl_usd > 0).sum())
-    losses = int((pnl_usd <= 0).sum())
+    # Return-based metrics (primary for win rate / expectancy)
+    r = df["return"].astype(float).fillna(0.0)
+    total = int(len(r))
+    wins = int((r > 0).sum())
+    losses = total - wins
     win_rate = (wins / total) if total else 0.0
+    avg_win = float(r[r > 0].mean()) if wins > 0 else 0.0
+    avg_loss = float(abs(r[r <= 0].mean())) if losses > 0 else 0.0
+    expectancy_ratio = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
 
-    avg_win_usd = float(pnl_usd[pnl_usd > 0].mean()) if wins > 0 else 0.0
-    avg_loss_usd = float(abs(pnl_usd[pnl_usd <= 0].mean())) if losses > 0 else 0.0
-    expectancy_usd = (win_rate * avg_win_usd) - ((1 - win_rate) * avg_loss_usd)
+    # USD-based metrics (optional; fallback to 0 if not provided)
+    pnl_usd_valid = pnl_usd.dropna()
+    usd_wins = pnl_usd_valid[pnl_usd_valid > 0]
+    usd_losses = pnl_usd_valid[pnl_usd_valid <= 0]
+    avg_win_usd = float(usd_wins.mean()) if not usd_wins.empty else 0.0
+    avg_loss_usd = float(abs(usd_losses.mean())) if not usd_losses.empty else 0.0
+    win_rate_usd = 0.0
+    if not pnl_usd_valid.empty:
+        win_rate_usd = float((pnl_usd_valid > 0).sum() / len(pnl_usd_valid))
+    expectancy_usd = (win_rate_usd * avg_win_usd) - ((1 - win_rate_usd) * avg_loss_usd)
 
     avg_r_atr = float(r_atr_series.dropna().mean()) if not r_atr_series.dropna().empty else float("nan")
     avg_r_usd = float(r_usd_series.dropna().mean()) if not r_usd_series.dropna().empty else float("nan")
 
-    # Retain legacy return-based helpers
-    r = df["return"].astype(float).fillna(0.0)
+    # Legacy payoff/profit-factor using returns
     payoff_ratio = 0.0
     try:
-        avg_win = float(r[r > 0].mean()) if (r > 0).any() else 0.0
-        avg_loss = float(abs(r[r <= 0].mean())) if (r <= 0).any() else 0.0
         payoff_ratio = (avg_win / avg_loss) if avg_loss > 0 else (math.inf if avg_win > 0 else 0.0)
     except Exception:
         payoff_ratio = 0.0
@@ -796,6 +805,9 @@ def generate_report(trades: Any, config: Optional[Dict[str, Any]] = None) -> pd.
         "wins": wins,
         "losses": losses,
         "win_rate": win_rate,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "expectancy": expectancy_ratio,
         "avg_win_usd": avg_win_usd,
         "avg_loss_usd": avg_loss_usd,
         "expectancy_usd": expectancy_usd,
