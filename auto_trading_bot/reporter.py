@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import csv
 import json
@@ -7,8 +7,37 @@ from datetime import datetime
 from typing import Any, Dict, Optional, Callable, Iterable
 
 
+import logging
 import math
 import pandas as pd
+
+
+
+logger = logging.getLogger(__name__)
+
+_DEBUG_VALUES = {"1", "true", "yes", "on"}
+
+def _debug_enabled() -> bool:
+    return os.getenv("OBS_DEBUG_ALERTS", "").strip().lower() in _DEBUG_VALUES
+
+def _safe_number(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(val) or math.isinf(val):
+        return None
+    return val
+
+def _log_report_metrics(payload: Dict[str, Any]) -> None:
+    if not _debug_enabled():
+        return
+    try:
+        logger.info("REPORTER_METRICS %s", json.dumps(payload, sort_keys=True))
+    except Exception:
+        logger.info("REPORTER_METRICS %s", payload)
 
 
 __all__ = ["Reporter", "generate_report", "save_report"]
@@ -823,6 +852,13 @@ def generate_report(trades: Any, config: Optional[Dict[str, Any]] = None) -> pd.
         "fallback_percent_count": percent_count,
     }
     data.update(_group_metrics_by_side(df))
+
+    _log_report_metrics({
+        "avg_r_atr_30": _safe_number(data.get("avg_r_atr")),
+        "window_trades": len(df),
+        "profit_factor_30": _safe_number(data.get("profit_factor")),
+        "expectancy_usd_30": _safe_number(data.get("expectancy_usd")),
+    })
 
     return pd.DataFrame([data])
 

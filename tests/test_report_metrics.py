@@ -1,12 +1,15 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import logging
 import json
+import pytest
 import math
 import os
 import subprocess
 import sys
 from pathlib import Path
 
+import auto_trading_bot.reporter as reporter
 import pandas as pd
 
 
@@ -73,3 +76,31 @@ def test_report_metrics_computes_r_without_column(tmp_path: Path) -> None:
     norm = pd.read_csv(normalized_csv)
     assert "R_atr_expost" in norm.columns
     assert norm["R_atr_expost"].notna().any(), "R_atr_expost should be computed when missing"
+
+def test_generate_report_logs_metrics(monkeypatch, caplog):
+    monkeypatch.setenv("OBS_DEBUG_ALERTS", "1")
+    df = pd.DataFrame({
+        "return": [0.6, -0.3, 0.4],
+        "R_atr_expost": [1.2, -0.5, 0.9],
+        "R_usd_expost": [40.0, -20.0, 25.0],
+        "pnl_quote_expost": [40.0, -20.0, 25.0],
+        "entry_ts": pd.to_datetime(["2023-01-01", "2023-01-02", "2023-01-03"]),
+        "exit_ts": pd.to_datetime(["2023-01-02", "2023-01-03", "2023-01-04"]),
+        "side": ["long", "short", "long"],
+    })
+
+    with caplog.at_level(logging.INFO, logger="auto_trading_bot.reporter"):
+        report = reporter.generate_report(df)
+
+    logs = [rec.message for rec in caplog.records if rec.message.startswith("REPORTER_METRICS ")]
+    assert logs, "Expected REPORTER_METRICS log entry"
+    payload = json.loads(logs[0].split(" ", 1)[1])
+    assert payload["avg_r_atr_30"] == pytest.approx(report.iloc[0]["avg_r_atr"])
+    assert payload["window_trades"] == 3
+
+
+def test_generate_report_empty_window(monkeypatch):
+    monkeypatch.setenv("OBS_DEBUG_ALERTS", "1")
+    empty_df = pd.DataFrame(columns=["return", "R_atr_expost", "R_usd_expost", "pnl_quote_expost", "entry_ts", "exit_ts", "side"])
+    report = reporter.generate_report(empty_df)
+    assert math.isnan(report.iloc[0]["avg_r_atr"])

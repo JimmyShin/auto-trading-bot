@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import logging
+import math
+import os
 import threading
 import time
 from typing import Any, Dict, Optional
@@ -9,8 +13,38 @@ from prometheus_client import Counter, Gauge, Histogram, start_http_server
 __all__ = [
     "start_metrics_server",
     "get_metrics_manager",
+    "dump_current_metrics",
     "MetricsManager",
 ]
+
+
+_logger = logging.getLogger(__name__)
+_DEBUG_VALUES = {"1", "true", "yes", "on"}
+
+
+def _debug_enabled() -> bool:
+    return os.getenv("OBS_DEBUG_ALERTS", "").strip().lower() in _DEBUG_VALUES
+
+
+def _safe_value(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _log_metrics_update(name: str, labels: Dict[str, Any], value: Any) -> None:
+    if not _debug_enabled():
+        return
+    payload = {
+        "name": name,
+        "labels": labels,
+        "value": _safe_value(value),
+        "ts": time.time(),
+    }
+    try:
+        _logger.info("METRICS_UPDATE %s", json.dumps(payload, sort_keys=True))
+    except Exception:
+        _logger.info("METRICS_UPDATE %s", payload)
 
 
 _bot_equity = Gauge("bot_equity", "Current account equity (quote)", ["account"])
@@ -50,33 +84,47 @@ class MetricsManager:
         self._lock = threading.Lock()
         self._time_drift_metrics: Dict[str, Gauge] = {}
         self._state: Dict[str, Any] = {
-            "equity": 0.0,
-            "daily_dd": 0.0,
-            "avg_r": float("nan"),
-            "trade_total": 0,
+            "equity": None,
+            "daily_dd": None,
+            "avg_r": None,
+            "trade_total": 0.0,
             "signal_totals": {},
             "order_errors": {},
-            "heartbeat_ts": 0.0,
+            "heartbeat_ts": None,
             "time_drift": {},
         }
         self._heartbeat_thread: Optional[threading.Thread] = None
 
     # --- Metrics setters -------------------------------------------------
-    def set_equity(self, value: float) -> None:
-        self._equity_metric.set(value)
+    def set_equity(self, value: Optional[float]) -> None:
+        if value is None or not math.isfinite(float(value)):
+            stored = None
+        else:
+            stored = float(value)
+            self._equity_metric.set(stored)
         with self._lock:
-            self._state["equity"] = value
+            self._state["equity"] = stored
+        _log_metrics_update("bot_equity", {"account": self.account}, stored)
 
-    def set_daily_drawdown(self, ratio: float) -> None:
-        ratio = max(0.0, float(ratio))
-        self._dd_metric.set(ratio)
+    def set_daily_drawdown(self, ratio: Optional[float]) -> None:
+        if ratio is None or not math.isfinite(float(ratio)):
+            stored = None
+        else:
+            stored = max(0.0, float(ratio))
+            self._dd_metric.set(stored)
         with self._lock:
-            self._state["daily_dd"] = ratio
+            self._state["daily_dd"] = stored
+        _log_metrics_update("bot_daily_drawdown", {"account": self.account}, stored)
 
-    def set_avg_r(self, value: float) -> None:
-        self._avg_r_metric.set(value)
+    def set_avg_r(self, value: Optional[float]) -> None:
+        if value is None or not math.isfinite(float(value)):
+            stored = None
+        else:
+            stored = float(value)
+            self._avg_r_metric.set(stored)
         with self._lock:
-            self._state["avg_r"] = value
+            self._state["avg_r"] = stored
+        _log_metrics_update("bot_avg_r_atr_30", {"account": self.account}, stored)
 
     def set_time_drift(self, source: str, drift_ms: float) -> None:
         metric = self._time_drift_metrics.get(source)
@@ -86,28 +134,34 @@ class MetricsManager:
         metric.set(drift_ms)
         with self._lock:
             drift_map = dict(self._state.get("time_drift", {}))
-            drift_map[source] = drift_ms
+            drift_map[source] = float(drift_ms)
             self._state["time_drift"] = drift_map
+        _log_metrics_update("bot_time_drift_ms", {"source": source}, drift_ms)
 
     def inc_trade_count(self, amount: float = 1.0) -> None:
         self._trade_counter.inc(amount)
+        _log_metrics_update("bot_trade_count_total", {"account": self.account}, amount)
         with self._lock:
-            self._state["trade_total"] = float(self._state.get("trade_total", 0)) + amount
+            self._state["trade_total"] = float(self._state.get("trade_total", 0.0)) + float(amount)
 
     def inc_signal(self, symbol: str, timeframe: str, amount: float = 1.0) -> None:
         _bot_signal_emitted_total.labels(symbol=symbol, timeframe=timeframe).inc(amount)
         with self._lock:
             totals = dict(self._state.get("signal_totals", {}))
             key = (symbol, timeframe)
-            totals[key] = float(totals.get(key, 0.0)) + amount
+            totals[key] = float(totals.get(key, 0.0)) + float(amount)
             self._state["signal_totals"] = totals
+            total_for_key = totals[key]
+        _log_metrics_update("bot_signal_emitted_total", {"symbol": symbol, "timeframe": timeframe}, total_for_key)
 
     def inc_order_error(self, reason: str, amount: float = 1.0) -> None:
         _bot_order_errors_total.labels(account=self.account, reason=reason).inc(amount)
         with self._lock:
             totals = dict(self._state.get("order_errors", {}))
-            totals[reason] = float(totals.get(reason, 0.0)) + amount
+            totals[reason] = float(totals.get(reason, 0.0)) + float(amount)
             self._state["order_errors"] = totals
+            total_for_reason = totals[reason]
+        _log_metrics_update("bot_order_errors_total", {"account": self.account, "reason": reason}, total_for_reason)
 
     def observe_loop_latency(self, latency_ms: float) -> None:
         self._loop_hist.observe(latency_ms)
@@ -119,6 +173,7 @@ class MetricsManager:
         self._heartbeat_metric.set(timestamp)
         with self._lock:
             self._state["heartbeat_ts"] = float(timestamp)
+        _log_metrics_update("bot_heartbeat_ts", {}, timestamp)
 
     def start_heartbeat_thread(self, interval: float = 60.0) -> None:
         if self._heartbeat_thread and self._heartbeat_thread.is_alive():
@@ -137,13 +192,13 @@ class MetricsManager:
     def get_snapshot(self) -> Dict[str, Any]:
         with self._lock:
             state_copy = {
-                "equity": self._state.get("equity", 0.0),
-                "daily_dd": self._state.get("daily_dd", 0.0),
-                "avg_r": self._state.get("avg_r", float("nan")),
-                "trade_total": float(self._state.get("trade_total", 0.0)),
+                "equity": self._state.get("equity"),
+                "daily_dd": self._state.get("daily_dd"),
+                "avg_r": self._state.get("avg_r"),
+                "trade_total": self._state.get("trade_total"),
                 "signal_totals": dict(self._state.get("signal_totals", {})),
                 "order_errors": dict(self._state.get("order_errors", {})),
-                "heartbeat_ts": float(self._state.get("heartbeat_ts", 0.0)),
+                "heartbeat_ts": self._state.get("heartbeat_ts"),
                 "time_drift": dict(self._state.get("time_drift", {})),
             }
         return state_copy
@@ -170,3 +225,11 @@ def start_metrics_server(port: int = 9108, account: str = "live", *, start_heart
 def get_metrics_manager() -> Optional[MetricsManager]:
     return _MANAGER
 
+
+def dump_current_metrics() -> Dict[str, Any]:
+    mgr = get_metrics_manager()
+    if mgr is None:
+        return {}
+    snapshot = mgr.get_snapshot()
+    snapshot["account"] = mgr.account
+    return snapshot

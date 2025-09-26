@@ -1,3 +1,4 @@
+import logging
 import sys
 
 try:
@@ -261,3 +262,146 @@ def test_emergency_dedupe_requires_escalation(monkeypatch):
     assert len(slack_calls) == 2
     assert "7000ms" in slack_calls[0]
     assert "9000ms" in slack_calls[1]
+
+def test_alerts_input_logging_includes_metrics(monkeypatch, caplog):
+    alerts_mod = reload_modules(
+        monkeypatch,
+        OBS_ACCOUNT_LABEL="ops",
+        OBS_SERVER_ENV="dev",
+        OBS_RUN_ID="log123",
+        TESTNET="false",
+        OBS_DEBUG_ALERTS="1",
+    )
+
+    snapshot = {
+        "equity": 15000.12,
+        "avg_r": 1.25,
+        "trade_total": 12.0,
+        "signal_totals": {("BTC/USDT", "1h"): 4.0},
+        "order_errors": {"auth": 2.0},
+        "time_drift": {"exchange": 42.0},
+        "heartbeat_ts": 1700000000.0,
+        "daily_dd": 0.02,
+    }
+
+    class FakeMetrics:
+        def __init__(self, snap):
+            self.snapshot = snap
+
+        def get_snapshot(self):
+            return self.snapshot
+
+    slack_calls = []
+
+    def sender(text, *, blocks=None):
+        slack_calls.append(text)
+        return True
+
+    cfg = dict(config.OBSERVABILITY)
+    cfg["heartbeat_interval_sec"] = 60
+
+    scheduler = alerts_mod.AlertScheduler(
+        FakeMetrics(snapshot),
+        cfg,
+        sender,
+        interval_sec=60.0,
+        now_fn=lambda: 2000.0,
+    )
+    scheduler.last_heartbeat_sent = 0.0
+    scheduler.last_heartbeat_trades = 7.0
+
+    with caplog.at_level(logging.INFO, logger="auto_trading_bot.alerts"):
+        scheduler.run_step()
+
+    alert_logs = [rec.message for rec in caplog.records if rec.message.startswith("ALERTS_INPUT ")]
+    assert alert_logs, "Expected ALERTS_INPUT instrumentation"
+    payload = json.loads(alert_logs[0].split(" ", 1)[1])
+    assert payload["acct"] == "ops"
+    assert payload["equity"] == pytest.approx(15000.12)
+    assert payload["trade_count_total"] == pytest.approx(12.0)
+    assert payload["signal_emitted_total"] == pytest.approx(4.0)
+    assert payload["trades_delta"] == pytest.approx(5.0)
+
+
+def test_auto_testnet_dd_requires_valid_equity_and_trades(monkeypatch):
+    alerts_mod = reload_modules(
+        monkeypatch,
+        OBS_ACCOUNT_LABEL="ops",
+        OBS_SERVER_ENV="dev",
+        OBS_RUN_ID="ddchk",
+        TESTNET="false",
+        OBS_DEBUG_ALERTS="1",
+    )
+    monkeypatch.setenv("AUTO_TESTNET_ON_DD", "true")
+    monkeypatch.setenv("DAILY_DD_LIMIT", "0.05")
+
+    snapshot = {
+        "equity": None,
+        "avg_r": 0.5,
+        "trade_total": 10.0,
+        "signal_totals": {("BTC/USDT", "1h"): 5.0},
+        "order_errors": {},
+        "time_drift": {},
+        "heartbeat_ts": None,
+        "daily_dd": 0.2,
+    }
+
+    class FakeMetrics:
+        def __init__(self, snap):
+            self.snapshot = snap
+
+        def get_snapshot(self):
+            return self.snapshot
+
+    slack_calls: list[str] = []
+
+    def sender(text, *, blocks=None):
+        slack_calls.append(text)
+        return True
+
+    config_copy = dict(config.OBSERVABILITY)
+    config_copy["alert_cooldown_sec"] = 60
+
+    current_time = 0.0
+
+    def fake_now():
+        return current_time
+
+    scheduler = alerts_mod.AlertScheduler(
+        FakeMetrics(snapshot),
+        config_copy,
+        sender,
+        interval_sec=60.0,
+        now_fn=fake_now,
+    )
+    scheduler.last_heartbeat_sent = -999.0
+
+    # Equity missing should prevent alerting
+    for step in range(3):
+        current_time = step * 60.0
+        snapshot["equity"] = None
+        scheduler.run_step()
+    assert not any("AUTO_TESTNET_ON_DD" in msg for msg in slack_calls)
+
+    slack_calls.clear()
+
+    # Equity present but no trade growth should still suppress
+    snapshot["equity"] = 12000.0
+    for step in range(3, 6):
+        current_time = step * 60.0
+        snapshot["trade_total"] = 10.0
+        scheduler.run_step()
+    assert not any("AUTO_TESTNET_ON_DD" in msg for msg in slack_calls)
+
+    slack_calls.clear()
+
+    # Valid equity with increasing trade totals should trigger once after sustain window
+    total = 10.0
+    for step in range(6, 10):
+        current_time = step * 60.0
+        total += 1.0
+        snapshot["trade_total"] = total
+        scheduler.run_step()
+
+    emergencies = [msg for msg in slack_calls if "AUTO_TESTNET_ON_DD" in msg]
+    assert len(emergencies) == 1

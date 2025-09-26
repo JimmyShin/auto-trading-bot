@@ -1,340 +1,704 @@
-import os
-import json
-from pathlib import Path
-from typing import Any, Dict
-from dotenv import load_dotenv
-
-load_dotenv()
-
-def _coerce_bool(value):
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
-
-def _coerce_list(value):
-    if isinstance(value, str):
-        return [item.strip() for item in value.split(",") if item.strip()]
-    if isinstance(value, (list, tuple, set)):
-        return [str(item).strip() for item in value if str(item).strip()]
-    raise TypeError("universe must be a list or comma-separated string")
-
-
-# API / environment
-BINANCE_KEY = os.getenv("BINANCE_KEY", "")
-BINANCE_SECRET = os.getenv("BINANCE_SECRET", "")
-TESTNET = os.getenv("TESTNET", "True").lower() == "true"
-
-# Restart behavior
-SAFE_RESTART = os.getenv("SAFE_RESTART", "true").lower() == "true"
-
-# Universe / quote
-QUOTE = os.getenv("QUOTE", "USDT")
-UNIVERSE = [s.strip() for s in os.getenv("UNIVERSE", "BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,AVAX/USDT").split(",")]
-
-# Risk / leverage
-RISK_PCT = 0.025  # 2.5%
-LEVERAGE = 10     # 10x
-
-# Position cap (notional)
-POSITION_CAP_MULTIPLE = float(os.getenv("POSITION_CAP_MULTIPLE", "2.0"))
-POSITION_CAP_MIN = float(os.getenv("POSITION_CAP_MIN", "10000"))
-POSITION_CAP_MAX = float(os.getenv("POSITION_CAP_MAX", "25000"))
-
-def get_position_cap(equity: float) -> float:
-    dynamic_cap = equity * POSITION_CAP_MULTIPLE
-    return min(max(dynamic_cap, POSITION_CAP_MIN), POSITION_CAP_MAX)
-
-# Pyramiding
-ENABLE_PYRAMIDING = True
-PYRAMID_LEVELS = [
-    (2.0, 0.3),  # +2.0R add 30%
-    (3.0, 0.2),  # +3.0R add 20%
-]
-PYRAMID_COOLDOWN_BARS = int(os.getenv("PYRAMID_COOLDOWN_BARS", "1"))
-
-# ATR / stops
-ATR_LEN = 14
-ATR_STOP_K = 1.2
-ATR_TRAIL_K = 2.5
-
-# Risk controls
-DAILY_LOSS_LIMIT = 0.06  # 6% daily loss
-DAILY_DD_LIMIT = float(os.getenv("DAILY_DD_LIMIT", "0.05"))
-FUNDING_AVOID_MIN = 5    # avoid entries/adds 5 minutes pre-funding
-
-# Runtime
-POLL_SEC = 30
-TF = "1h"
-LOOKBACK = 400
-STATE_FILE = "state.json"
-
-# Strategy tuning (adjust during testing)
-# Candle-position filters: long allowed below this fraction from high; short allowed above this from low
-CANDLE_LONG_MAX_POS_RATIO = 0.75
-CANDLE_SHORT_MIN_POS_RATIO = 0.25
-
-# Oversize tolerance (multiplier vs RISK_PCT)
-OVERSIZE_TOLERANCE = 1.30
-
-# Data directory base (logs/CSVs go under data/<env>/)
-DATA_BASE_DIR = os.getenv("DATA_DIR", "data")
-
-# Auto-switch to testnet after daily loss limit is hit (when flat)
-AUTO_TESTNET_ON_DD = _coerce_bool(os.getenv("AUTO_TESTNET_ON_DD", "true"))
-
-# Emergency handling
-EMERGENCY_POLICY = os.getenv("EMERGENCY_POLICY", "flatten_all").lower()
-# Options: 'protect_only' | 'flatten_if_safe' | 'flatten_all'
-EMERGENCY_MIN_PNL_TO_CLOSE_PCT = float(os.getenv("EMERGENCY_MIN_PNL_TO_CLOSE_PCT", "0"))
-EMERGENCY_STOP_FALLBACK_PCT = float(os.getenv("EMERGENCY_STOP_FALLBACK_PCT", "0.015"))  # 1.5%
-KILL_SWITCH = {
-    "auth_failures": int(os.getenv("KILL_SWITCH_AUTH_FAILURES", "5")),
-    "nonce_errors": int(os.getenv("KILL_SWITCH_NONCE_ERRORS", "3")),
-    "time_drift_sec": float(os.getenv("KILL_SWITCH_TIME_DRIFT_SEC", "5")),
-    "max_retries": int(os.getenv("KILL_SWITCH_MAX_RETRIES", "3")),
-}
-
-
-OBSERVABILITY = {
-    "metrics_port": int(os.getenv("METRICS_PORT", "9108")),
-    "heartbeat_interval_sec": int(os.getenv("OBS_HEARTBEAT_INTERVAL_SEC", "43200")),
-    "heartbeat_missing_sec": int(os.getenv("OBS_HEARTBEAT_MISSING_SEC", "64800")),
-    "clock_drift_warn_ms": float(os.getenv("OBS_CLOCK_DRIFT_WARN_MS", "5000")),
-    "error_burst_threshold": int(os.getenv("OBS_ERROR_BURST_THRESHOLD", "10")),
-    "error_burst_window_sec": int(os.getenv("OBS_ERROR_BURST_WINDOW_SEC", "300")),
-    "no_trade_signals_min": int(os.getenv("OBS_NO_TRADE_SIGNALS_MIN", "5")),
-    "no_trade_window_sec": int(os.getenv("OBS_NO_TRADE_WINDOW_SEC", "7200")),
-    "alert_cooldown_sec": int(os.getenv("OBS_ALERT_COOLDOWN_SEC", "600")),
-    "account_label": os.getenv("OBS_ACCOUNT_LABEL", "live"),
-    "order_retry": int(os.getenv("OBS_ORDER_RETRY", "3")),
-    "order_retry_backoff_sec": float(os.getenv("OBS_ORDER_RETRY_BACKOFF_SEC", "1.0")),
-}
-CONFIG_JSON_PATH = Path(os.getenv("BOT_CONFIG_JSON", "config.json"))
-
-# --- JSON Schema validation helpers ---
-def _load_schema() -> Dict[str, Any]:
-    schema_path = Path(__file__).resolve().parent / "config.schema.json"
-    if schema_path.exists():
-        try:
-            return json.loads(schema_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "binance_key": {"type": "string"},
-            "binance_secret": {"type": "string"},
-            "testnet": {"type": "boolean"},
-            "safe_restart": {"type": "boolean"},
-            "quote": {"type": "string"},
-            "universe": {"type": "array", "items": {"type": "string"}},
-            "risk_pct": {"type": "number"},
-            "leverage": {"type": ["number", "integer"]},
-            "enable_pyramiding": {"type": "boolean"},
-            "pyramid_levels": {
-                "type": "array",
-                "items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}},
-            },
-            "atr_len": {"type": "integer"},
-            "atr_stop_k": {"type": "number"},
-            "atr_trail_k": {"type": "number"},
-            "daily_loss_limit": {"type": "number"},
-            "funding_avoid_min": {"type": "integer"},
-            "daily_dd_limit": {"type": "number"},
-            "poll_sec": {"type": "integer"},
-            "timeframe": {"type": "string"},
-            "lookback": {"type": "integer"},
-            "state_file": {"type": "string"},
-            "data_dir": {"type": "string"},
-            "auto_testnet_on_dd": {"type": "boolean"},
-            "emergency_policy": {"type": "string", "enum": ["protect_only", "flatten_if_safe", "flatten_all"]},
-            "emergency_min_pnl_to_close_pct": {"type": "number"},
-            "emergency_stop_fallback_pct": {"type": "number"},
-            "kill_switch": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "auth_failures": {"type": "integer"},
-                    "nonce_errors": {"type": "integer"},
-                    "time_drift_sec": {"type": "number"},
-                    "max_retries": {"type": "integer"}
-                }
-            },
-            "position_cap": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "multiple": {"type": "number"},
-                    "min": {"type": "number"},
-                    "max": {"type": "number"},
-                },
-            },
-            "candle_long_max_pos_ratio": {"type": "number"},
-            "candle_short_min_pos_ratio": {"type": "number"},
-            "oversize_tolerance": {"type": "number"},
-            "pyramid_cooldown_bars": {"type": "integer"},
-        },
-    }
-
-
-def validate_config_dict(obj: Dict[str, Any]) -> None:
-    if not isinstance(obj, dict):
-        raise RuntimeError("config.json must contain a JSON object")
-    try:
-        import jsonschema  # type: ignore
-    except Exception:
-        return  # jsonschema not installed; skip validation
-    schema = _load_schema()
-    try:
-        jsonschema.validate(instance=obj, schema=schema)  # type: ignore[attr-defined]
-    except Exception as exc:
-        raise RuntimeError(f"config.json validation failed: {exc}") from exc
-
-if CONFIG_JSON_PATH.exists():
-    try:
-        _json_config = json.loads(CONFIG_JSON_PATH.read_text(encoding="utf-8"))
-        # Validate against JSON Schema before applying
-        validate_config_dict(_json_config)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to parse {CONFIG_JSON_PATH}: {exc}") from exc
-
-    if 'binance_key' in _json_config:
-        BINANCE_KEY = str(_json_config['binance_key'])
-    if 'binance_secret' in _json_config:
-        BINANCE_SECRET = str(_json_config['binance_secret'])
-    if 'testnet' in _json_config:
-        TESTNET = _coerce_bool(_json_config['testnet'])
-    if 'safe_restart' in _json_config:
-        SAFE_RESTART = _coerce_bool(_json_config['safe_restart'])
-    if 'quote' in _json_config:
-        QUOTE = str(_json_config['quote'])
-    if 'universe' in _json_config:
-        UNIVERSE = _coerce_list(_json_config['universe'])
-    if 'risk_pct' in _json_config:
-        RISK_PCT = float(_json_config['risk_pct'])
-    if 'leverage' in _json_config:
-        LEVERAGE = float(_json_config['leverage'])
-    if 'enable_pyramiding' in _json_config:
-        ENABLE_PYRAMIDING = _coerce_bool(_json_config['enable_pyramiding'])
-    if 'pyramid_levels' in _json_config:
-        levels = []
-        for entry in _json_config['pyramid_levels'] or []:
-            if isinstance(entry, (list, tuple)) and len(entry) == 2:
-                levels.append((float(entry[0]), float(entry[1])))
-        if levels:
-            PYRAMID_LEVELS = levels
-    if 'pyramid_cooldown_bars' in _json_config:
-        PYRAMID_COOLDOWN_BARS = int(_json_config['pyramid_cooldown_bars'])
-    if 'atr_len' in _json_config:
-        ATR_LEN = int(_json_config['atr_len'])
-    if 'atr_stop_k' in _json_config:
-        ATR_STOP_K = float(_json_config['atr_stop_k'])
-    if 'atr_trail_k' in _json_config:
-        ATR_TRAIL_K = float(_json_config['atr_trail_k'])
-    if 'daily_loss_limit' in _json_config:
-        DAILY_LOSS_LIMIT = float(_json_config['daily_loss_limit'])
-    if 'daily_dd_limit' in _json_config:
-        DAILY_DD_LIMIT = float(_json_config['daily_dd_limit'])
-    if 'funding_avoid_min' in _json_config:
-        FUNDING_AVOID_MIN = int(_json_config['funding_avoid_min'])
-    if 'poll_sec' in _json_config:
-        POLL_SEC = int(_json_config['poll_sec'])
-    if 'timeframe' in _json_config:
-        TF = str(_json_config['timeframe'])
-    if 'lookback' in _json_config:
-        LOOKBACK = int(_json_config['lookback'])
-    if 'state_file' in _json_config:
-        STATE_FILE = str(_json_config['state_file'])
-    if 'candle_long_max_pos_ratio' in _json_config:
-        CANDLE_LONG_MAX_POS_RATIO = float(_json_config['candle_long_max_pos_ratio'])
-    if 'candle_short_min_pos_ratio' in _json_config:
-        CANDLE_SHORT_MIN_POS_RATIO = float(_json_config['candle_short_min_pos_ratio'])
-    if 'oversize_tolerance' in _json_config:
-        OVERSIZE_TOLERANCE = float(_json_config['oversize_tolerance'])
-    if 'data_dir' in _json_config:
-        DATA_BASE_DIR = str(_json_config['data_dir'])
-    if 'auto_testnet_on_dd' in _json_config:
-        AUTO_TESTNET_ON_DD = _coerce_bool(_json_config['auto_testnet_on_dd'])
-    if 'emergency_policy' in _json_config:
-        EMERGENCY_POLICY = str(_json_config['emergency_policy']).lower()
-    if 'emergency_min_pnl_to_close_pct' in _json_config:
-        EMERGENCY_MIN_PNL_TO_CLOSE_PCT = float(_json_config['emergency_min_pnl_to_close_pct'])
-    if 'emergency_stop_fallback_pct' in _json_config:
-        EMERGENCY_STOP_FALLBACK_PCT = float(_json_config['emergency_stop_fallback_pct'])
-    if 'kill_switch' in _json_config:
-        ks = _json_config['kill_switch'] or {}
-        if 'auth_failures' in ks:
-            KILL_SWITCH['auth_failures'] = int(ks['auth_failures'])
-        if 'nonce_errors' in ks:
-            KILL_SWITCH['nonce_errors'] = int(ks['nonce_errors'])
-        if 'time_drift_sec' in ks:
-            KILL_SWITCH['time_drift_sec'] = float(ks['time_drift_sec'])
-        if 'max_retries' in ks:
-            KILL_SWITCH['max_retries'] = int(ks['max_retries'])
-    if 'observability' in _json_config:
-        obs = _json_config['observability'] or {}
-        for key, value in obs.items():
-            if key not in OBSERVABILITY:
-                continue
-            target = OBSERVABILITY[key]
-            try:
-                if isinstance(target, bool):
-                    OBSERVABILITY[key] = _coerce_bool(value)
-                elif isinstance(target, int):
-                    OBSERVABILITY[key] = int(value)
-                elif isinstance(target, float):
-                    OBSERVABILITY[key] = float(value)
-                else:
-                    OBSERVABILITY[key] = str(value)
-            except Exception:
-                OBSERVABILITY[key] = target
-    if 'position_cap' in _json_config:
-        pc = _json_config['position_cap'] or {}
-        if 'multiple' in pc:
-            POSITION_CAP_MULTIPLE = float(pc['multiple'])
-        if 'min' in pc:
-            POSITION_CAP_MIN = float(pc['min'])
-        if 'max' in pc:
-            POSITION_CAP_MAX = float(pc['max'])
-
-    del _json_config
-
-# Snapshot for logging (no secrets)
-def active_config_snapshot() -> Dict[str, Any]:
-    return {
-        "TESTNET": TESTNET,
-        "SAFE_RESTART": SAFE_RESTART,
-        "QUOTE": QUOTE,
-        "UNIVERSE": list(UNIVERSE),
-        "RISK_PCT": RISK_PCT,
-        "LEVERAGE": LEVERAGE,
-        "ATR_LEN": ATR_LEN,
-        "ATR_STOP_K": ATR_STOP_K,
-        "ATR_TRAIL_K": ATR_TRAIL_K,
-        "DAILY_LOSS_LIMIT": DAILY_LOSS_LIMIT,
-        "DAILY_DD_LIMIT": DAILY_DD_LIMIT,
-        "FUNDING_AVOID_MIN": FUNDING_AVOID_MIN,
-        "POLL_SEC": POLL_SEC,
-        "TF": TF,
-        "LOOKBACK": LOOKBACK,
-        "STATE_FILE": STATE_FILE,
-        "DATA_BASE_DIR": DATA_BASE_DIR,
-        "POSITION_CAP_MULTIPLE": POSITION_CAP_MULTIPLE,
-        "POSITION_CAP_MIN": POSITION_CAP_MIN,
-        "POSITION_CAP_MAX": POSITION_CAP_MAX,
-        "ENABLE_PYRAMIDING": ENABLE_PYRAMIDING,
-        "PYRAMID_LEVELS": PYRAMID_LEVELS,
-        "AUTO_TESTNET_ON_DD": AUTO_TESTNET_ON_DD,
-        "EMERGENCY_POLICY": EMERGENCY_POLICY,
-        "EMERGENCY_MIN_PNL_TO_CLOSE_PCT": EMERGENCY_MIN_PNL_TO_CLOSE_PCT,
-        "EMERGENCY_STOP_FALLBACK_PCT": EMERGENCY_STOP_FALLBACK_PCT,
-        "KILL_SWITCH": KILL_SWITCH,
-        "OBSERVABILITY": OBSERVABILITY,
-        "CANDLE_LONG_MAX_POS_RATIO": CANDLE_LONG_MAX_POS_RATIO,
-        "CANDLE_SHORT_MIN_POS_RATIO": CANDLE_SHORT_MIN_POS_RATIO,
-        "OVERSIZE_TOLERANCE": OVERSIZE_TOLERANCE,
-    }
-
+import os
+
+import json
+
+from pathlib import Path
+
+from typing import Any, Dict
+
+from dotenv import load_dotenv
+
+
+
+load_dotenv()
+
+
+
+def _coerce_bool(value):
+
+    if isinstance(value, bool):
+
+        return value
+
+    if isinstance(value, str):
+
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+
+    return bool(value)
+
+
+
+def _coerce_list(value):
+
+    if isinstance(value, str):
+
+        return [item.strip() for item in value.split(",") if item.strip()]
+
+    if isinstance(value, (list, tuple, set)):
+
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    raise TypeError("universe must be a list or comma-separated string")
+
+
+
+
+
+# API / environment
+
+BINANCE_KEY = os.getenv("BINANCE_KEY", "")
+
+BINANCE_SECRET = os.getenv("BINANCE_SECRET", "")
+
+TESTNET = os.getenv("TESTNET", "True").lower() == "true"
+
+
+
+# Restart behavior
+
+SAFE_RESTART = os.getenv("SAFE_RESTART", "true").lower() == "true"
+
+
+
+# Universe / quote
+
+QUOTE = os.getenv("QUOTE", "USDT")
+
+UNIVERSE = [s.strip() for s in os.getenv("UNIVERSE", "BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT,AVAX/USDT").split(",")]
+
+
+
+# Risk / leverage
+
+RISK_PCT = 0.025  # 2.5%
+
+LEVERAGE = 10     # 10x
+
+
+
+# Position cap (notional)
+
+POSITION_CAP_MULTIPLE = float(os.getenv("POSITION_CAP_MULTIPLE", "2.0"))
+
+POSITION_CAP_MIN = float(os.getenv("POSITION_CAP_MIN", "10000"))
+
+POSITION_CAP_MAX = float(os.getenv("POSITION_CAP_MAX", "25000"))
+
+
+
+def get_position_cap(equity: float) -> float:
+
+    dynamic_cap = equity * POSITION_CAP_MULTIPLE
+
+    return min(max(dynamic_cap, POSITION_CAP_MIN), POSITION_CAP_MAX)
+
+
+
+# Pyramiding
+
+ENABLE_PYRAMIDING = True
+
+PYRAMID_LEVELS = [
+
+    (2.0, 0.3),  # +2.0R add 30%
+
+    (3.0, 0.2),  # +3.0R add 20%
+
+]
+
+PYRAMID_COOLDOWN_BARS = int(os.getenv("PYRAMID_COOLDOWN_BARS", "1"))
+
+
+
+# ATR / stops
+
+ATR_LEN = 14
+
+ATR_STOP_K = 1.2
+
+ATR_TRAIL_K = 2.5
+
+
+
+# Risk controls
+
+DAILY_LOSS_LIMIT = 0.06  # 6% daily loss
+
+DAILY_DD_LIMIT = float(os.getenv("DAILY_DD_LIMIT", "0.05"))
+
+FUNDING_AVOID_MIN = 5    # avoid entries/adds 5 minutes pre-funding
+
+
+
+# Runtime
+
+POLL_SEC = 30
+
+TF = "1h"
+
+LOOKBACK = 400
+
+STATE_FILE = "state.json"
+
+
+
+# Strategy tuning (adjust during testing)
+
+# Candle-position filters: long allowed below this fraction from high; short allowed above this from low
+
+CANDLE_LONG_MAX_POS_RATIO = 0.75
+
+CANDLE_SHORT_MIN_POS_RATIO = 0.25
+
+
+
+# Oversize tolerance (multiplier vs RISK_PCT)
+
+OVERSIZE_TOLERANCE = 1.30
+
+
+
+# Data directory base (logs/CSVs go under data/<env>/)
+
+DATA_BASE_DIR = os.getenv("DATA_DIR", "data")
+
+
+
+# Auto-switch to testnet after daily loss limit is hit (when flat)
+
+AUTO_TESTNET_ON_DD = _coerce_bool(os.getenv("AUTO_TESTNET_ON_DD", "true"))
+
+# Observability context
+_ALLOWED_OBS_ENVS = {"prod", "staging", "dev", "local"}
+
+OBS_SERVER_ENV = (os.getenv("OBS_SERVER_ENV", "local") or "local").strip().lower()
+if OBS_SERVER_ENV not in _ALLOWED_OBS_ENVS:
+    OBS_SERVER_ENV = "local"
+
+_raw_obs_account = (os.getenv("OBS_ACCOUNT_LABEL") or "").strip()
+if _raw_obs_account:
+    OBS_ACCOUNT_LABEL = _raw_obs_account
+else:
+    if TESTNET:
+        OBS_ACCOUNT_LABEL = "testnet"
+    elif OBS_SERVER_ENV == "prod":
+        OBS_ACCOUNT_LABEL = "live"
+    else:
+        OBS_ACCOUNT_LABEL = "testnet"
+
+OBS_SLACK_PREFIX = (os.getenv("OBS_SLACK_PREFIX") or "").strip()
+
+
+
+# Emergency handling
+
+EMERGENCY_POLICY = os.getenv("EMERGENCY_POLICY", "flatten_all").lower()
+
+# Options: 'protect_only' | 'flatten_if_safe' | 'flatten_all'
+
+EMERGENCY_MIN_PNL_TO_CLOSE_PCT = float(os.getenv("EMERGENCY_MIN_PNL_TO_CLOSE_PCT", "0"))
+
+EMERGENCY_STOP_FALLBACK_PCT = float(os.getenv("EMERGENCY_STOP_FALLBACK_PCT", "0.015"))  # 1.5%
+
+KILL_SWITCH = {
+
+    "auth_failures": int(os.getenv("KILL_SWITCH_AUTH_FAILURES", "5")),
+
+    "nonce_errors": int(os.getenv("KILL_SWITCH_NONCE_ERRORS", "3")),
+
+    "time_drift_sec": float(os.getenv("KILL_SWITCH_TIME_DRIFT_SEC", "5")),
+
+    "max_retries": int(os.getenv("KILL_SWITCH_MAX_RETRIES", "3")),
+
+}
+
+
+
+
+
+OBSERVABILITY = {
+
+    "metrics_port": int(os.getenv("METRICS_PORT", "9108")),
+
+    "heartbeat_interval_sec": int(os.getenv("OBS_HEARTBEAT_INTERVAL_SEC", "43200")),
+
+    "heartbeat_missing_sec": int(os.getenv("OBS_HEARTBEAT_MISSING_SEC", "64800")),
+
+    "clock_drift_warn_ms": float(os.getenv("OBS_CLOCK_DRIFT_WARN_MS", "5000")),
+
+    "error_burst_threshold": int(os.getenv("OBS_ERROR_BURST_THRESHOLD", "10")),
+
+    "error_burst_window_sec": int(os.getenv("OBS_ERROR_BURST_WINDOW_SEC", "300")),
+
+    "no_trade_signals_min": int(os.getenv("OBS_NO_TRADE_SIGNALS_MIN", "5")),
+
+    "no_trade_window_sec": int(os.getenv("OBS_NO_TRADE_WINDOW_SEC", "7200")),
+
+    "alert_cooldown_sec": int(os.getenv("OBS_ALERT_COOLDOWN_SEC", "600")),
+
+    "account_label": OBS_ACCOUNT_LABEL,
+
+    "server_env": OBS_SERVER_ENV,
+
+    "slack_prefix": OBS_SLACK_PREFIX,
+
+    "order_retry": int(os.getenv("OBS_ORDER_RETRY", "3")),
+
+    "order_retry_backoff_sec": float(os.getenv("OBS_ORDER_RETRY_BACKOFF_SEC", "1.0")),
+
+}
+
+CONFIG_JSON_PATH = Path(os.getenv("BOT_CONFIG_JSON", "config.json"))
+
+
+
+# --- JSON Schema validation helpers ---
+
+def _load_schema() -> Dict[str, Any]:
+
+    schema_path = Path(__file__).resolve().parent / "config.schema.json"
+
+    if schema_path.exists():
+
+        try:
+
+            return json.loads(schema_path.read_text(encoding="utf-8"))
+
+        except Exception:
+
+            pass
+
+    return {
+
+        "type": "object",
+
+        "additionalProperties": False,
+
+        "properties": {
+
+            "binance_key": {"type": "string"},
+
+            "binance_secret": {"type": "string"},
+
+            "testnet": {"type": "boolean"},
+
+            "safe_restart": {"type": "boolean"},
+
+            "quote": {"type": "string"},
+
+            "universe": {"type": "array", "items": {"type": "string"}},
+
+            "risk_pct": {"type": "number"},
+
+            "leverage": {"type": ["number", "integer"]},
+
+            "enable_pyramiding": {"type": "boolean"},
+
+            "pyramid_levels": {
+
+                "type": "array",
+
+                "items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}},
+
+            },
+
+            "atr_len": {"type": "integer"},
+
+            "atr_stop_k": {"type": "number"},
+
+            "atr_trail_k": {"type": "number"},
+
+            "daily_loss_limit": {"type": "number"},
+
+            "funding_avoid_min": {"type": "integer"},
+
+            "daily_dd_limit": {"type": "number"},
+
+            "poll_sec": {"type": "integer"},
+
+            "timeframe": {"type": "string"},
+
+            "lookback": {"type": "integer"},
+
+            "state_file": {"type": "string"},
+
+            "data_dir": {"type": "string"},
+
+            "auto_testnet_on_dd": {"type": "boolean"},
+
+            "emergency_policy": {"type": "string", "enum": ["protect_only", "flatten_if_safe", "flatten_all"]},
+
+            "emergency_min_pnl_to_close_pct": {"type": "number"},
+
+            "emergency_stop_fallback_pct": {"type": "number"},
+
+            "kill_switch": {
+
+                "type": "object",
+
+                "additionalProperties": False,
+
+                "properties": {
+
+                    "auth_failures": {"type": "integer"},
+
+                    "nonce_errors": {"type": "integer"},
+
+                    "time_drift_sec": {"type": "number"},
+
+                    "max_retries": {"type": "integer"}
+
+                }
+
+            },
+
+            "position_cap": {
+
+                "type": "object",
+
+                "additionalProperties": False,
+
+                "properties": {
+
+                    "multiple": {"type": "number"},
+
+                    "min": {"type": "number"},
+
+                    "max": {"type": "number"},
+
+                },
+
+            },
+
+            "candle_long_max_pos_ratio": {"type": "number"},
+
+            "candle_short_min_pos_ratio": {"type": "number"},
+
+            "oversize_tolerance": {"type": "number"},
+
+            "pyramid_cooldown_bars": {"type": "integer"},
+
+        },
+
+    }
+
+
+
+
+
+def validate_config_dict(obj: Dict[str, Any]) -> None:
+
+    if not isinstance(obj, dict):
+
+        raise RuntimeError("config.json must contain a JSON object")
+
+    try:
+
+        import jsonschema  # type: ignore
+
+    except Exception:
+
+        return  # jsonschema not installed; skip validation
+
+    schema = _load_schema()
+
+    try:
+
+        jsonschema.validate(instance=obj, schema=schema)  # type: ignore[attr-defined]
+
+    except Exception as exc:
+
+        raise RuntimeError(f"config.json validation failed: {exc}") from exc
+
+
+
+if CONFIG_JSON_PATH.exists():
+
+    try:
+
+        _json_config = json.loads(CONFIG_JSON_PATH.read_text(encoding="utf-8"))
+
+        # Validate against JSON Schema before applying
+
+        validate_config_dict(_json_config)
+
+    except Exception as exc:
+
+        raise RuntimeError(f"Failed to parse {CONFIG_JSON_PATH}: {exc}") from exc
+
+
+
+    if 'binance_key' in _json_config:
+
+        BINANCE_KEY = str(_json_config['binance_key'])
+
+    if 'binance_secret' in _json_config:
+
+        BINANCE_SECRET = str(_json_config['binance_secret'])
+
+    if 'testnet' in _json_config:
+
+        TESTNET = _coerce_bool(_json_config['testnet'])
+
+    if 'safe_restart' in _json_config:
+
+        SAFE_RESTART = _coerce_bool(_json_config['safe_restart'])
+
+    if 'quote' in _json_config:
+
+        QUOTE = str(_json_config['quote'])
+
+    if 'universe' in _json_config:
+
+        UNIVERSE = _coerce_list(_json_config['universe'])
+
+    if 'risk_pct' in _json_config:
+
+        RISK_PCT = float(_json_config['risk_pct'])
+
+    if 'leverage' in _json_config:
+
+        LEVERAGE = float(_json_config['leverage'])
+
+    if 'enable_pyramiding' in _json_config:
+
+        ENABLE_PYRAMIDING = _coerce_bool(_json_config['enable_pyramiding'])
+
+    if 'pyramid_levels' in _json_config:
+
+        levels = []
+
+        for entry in _json_config['pyramid_levels'] or []:
+
+            if isinstance(entry, (list, tuple)) and len(entry) == 2:
+
+                levels.append((float(entry[0]), float(entry[1])))
+
+        if levels:
+
+            PYRAMID_LEVELS = levels
+
+    if 'pyramid_cooldown_bars' in _json_config:
+
+        PYRAMID_COOLDOWN_BARS = int(_json_config['pyramid_cooldown_bars'])
+
+    if 'atr_len' in _json_config:
+
+        ATR_LEN = int(_json_config['atr_len'])
+
+    if 'atr_stop_k' in _json_config:
+
+        ATR_STOP_K = float(_json_config['atr_stop_k'])
+
+    if 'atr_trail_k' in _json_config:
+
+        ATR_TRAIL_K = float(_json_config['atr_trail_k'])
+
+    if 'daily_loss_limit' in _json_config:
+
+        DAILY_LOSS_LIMIT = float(_json_config['daily_loss_limit'])
+
+    if 'daily_dd_limit' in _json_config:
+
+        DAILY_DD_LIMIT = float(_json_config['daily_dd_limit'])
+
+    if 'funding_avoid_min' in _json_config:
+
+        FUNDING_AVOID_MIN = int(_json_config['funding_avoid_min'])
+
+    if 'poll_sec' in _json_config:
+
+        POLL_SEC = int(_json_config['poll_sec'])
+
+    if 'timeframe' in _json_config:
+
+        TF = str(_json_config['timeframe'])
+
+    if 'lookback' in _json_config:
+
+        LOOKBACK = int(_json_config['lookback'])
+
+    if 'state_file' in _json_config:
+
+        STATE_FILE = str(_json_config['state_file'])
+
+    if 'candle_long_max_pos_ratio' in _json_config:
+
+        CANDLE_LONG_MAX_POS_RATIO = float(_json_config['candle_long_max_pos_ratio'])
+
+    if 'candle_short_min_pos_ratio' in _json_config:
+
+        CANDLE_SHORT_MIN_POS_RATIO = float(_json_config['candle_short_min_pos_ratio'])
+
+    if 'oversize_tolerance' in _json_config:
+
+        OVERSIZE_TOLERANCE = float(_json_config['oversize_tolerance'])
+
+    if 'data_dir' in _json_config:
+
+        DATA_BASE_DIR = str(_json_config['data_dir'])
+
+    if 'auto_testnet_on_dd' in _json_config:
+
+        AUTO_TESTNET_ON_DD = _coerce_bool(_json_config['auto_testnet_on_dd'])
+
+    if 'emergency_policy' in _json_config:
+
+        EMERGENCY_POLICY = str(_json_config['emergency_policy']).lower()
+
+    if 'emergency_min_pnl_to_close_pct' in _json_config:
+
+        EMERGENCY_MIN_PNL_TO_CLOSE_PCT = float(_json_config['emergency_min_pnl_to_close_pct'])
+
+    if 'emergency_stop_fallback_pct' in _json_config:
+
+        EMERGENCY_STOP_FALLBACK_PCT = float(_json_config['emergency_stop_fallback_pct'])
+
+    if 'kill_switch' in _json_config:
+
+        ks = _json_config['kill_switch'] or {}
+
+        if 'auth_failures' in ks:
+
+            KILL_SWITCH['auth_failures'] = int(ks['auth_failures'])
+
+        if 'nonce_errors' in ks:
+
+            KILL_SWITCH['nonce_errors'] = int(ks['nonce_errors'])
+
+        if 'time_drift_sec' in ks:
+
+            KILL_SWITCH['time_drift_sec'] = float(ks['time_drift_sec'])
+
+        if 'max_retries' in ks:
+
+            KILL_SWITCH['max_retries'] = int(ks['max_retries'])
+
+    if 'observability' in _json_config:
+
+        obs = _json_config['observability'] or {}
+
+        for key, value in obs.items():
+
+            if key not in OBSERVABILITY:
+
+                continue
+
+            target = OBSERVABILITY[key]
+
+            try:
+
+                if isinstance(target, bool):
+
+                    OBSERVABILITY[key] = _coerce_bool(value)
+
+                elif isinstance(target, int):
+
+                    OBSERVABILITY[key] = int(value)
+
+                elif isinstance(target, float):
+
+                    OBSERVABILITY[key] = float(value)
+
+                else:
+
+                    OBSERVABILITY[key] = str(value)
+
+            except Exception:
+
+                OBSERVABILITY[key] = target
+
+    if 'position_cap' in _json_config:
+
+        pc = _json_config['position_cap'] or {}
+
+        if 'multiple' in pc:
+
+            POSITION_CAP_MULTIPLE = float(pc['multiple'])
+
+        if 'min' in pc:
+
+            POSITION_CAP_MIN = float(pc['min'])
+
+        if 'max' in pc:
+
+            POSITION_CAP_MAX = float(pc['max'])
+
+
+
+    del _json_config
+
+
+
+# Snapshot for logging (no secrets)
+
+def active_config_snapshot() -> Dict[str, Any]:
+
+    return {
+
+        "TESTNET": TESTNET,
+
+        "SAFE_RESTART": SAFE_RESTART,
+
+        "QUOTE": QUOTE,
+
+        "UNIVERSE": list(UNIVERSE),
+
+        "RISK_PCT": RISK_PCT,
+
+        "LEVERAGE": LEVERAGE,
+
+        "ATR_LEN": ATR_LEN,
+
+        "ATR_STOP_K": ATR_STOP_K,
+
+        "ATR_TRAIL_K": ATR_TRAIL_K,
+
+        "DAILY_LOSS_LIMIT": DAILY_LOSS_LIMIT,
+
+        "DAILY_DD_LIMIT": DAILY_DD_LIMIT,
+
+        "FUNDING_AVOID_MIN": FUNDING_AVOID_MIN,
+
+        "POLL_SEC": POLL_SEC,
+
+        "TF": TF,
+
+        "LOOKBACK": LOOKBACK,
+
+        "STATE_FILE": STATE_FILE,
+
+        "DATA_BASE_DIR": DATA_BASE_DIR,
+
+        "POSITION_CAP_MULTIPLE": POSITION_CAP_MULTIPLE,
+
+        "POSITION_CAP_MIN": POSITION_CAP_MIN,
+
+        "POSITION_CAP_MAX": POSITION_CAP_MAX,
+
+        "ENABLE_PYRAMIDING": ENABLE_PYRAMIDING,
+
+        "PYRAMID_LEVELS": PYRAMID_LEVELS,
+
+        "AUTO_TESTNET_ON_DD": AUTO_TESTNET_ON_DD,
+
+        "EMERGENCY_POLICY": EMERGENCY_POLICY,
+
+        "EMERGENCY_MIN_PNL_TO_CLOSE_PCT": EMERGENCY_MIN_PNL_TO_CLOSE_PCT,
+
+        "EMERGENCY_STOP_FALLBACK_PCT": EMERGENCY_STOP_FALLBACK_PCT,
+
+        "KILL_SWITCH": KILL_SWITCH,
+
+        "OBSERVABILITY": OBSERVABILITY,
+
+        "CANDLE_LONG_MAX_POS_RATIO": CANDLE_LONG_MAX_POS_RATIO,
+
+        "CANDLE_SHORT_MIN_POS_RATIO": CANDLE_SHORT_MIN_POS_RATIO,
+
+        "OVERSIZE_TOLERANCE": OVERSIZE_TOLERANCE,
+
+    }
+
+
+
