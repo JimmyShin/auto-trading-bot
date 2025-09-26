@@ -1,0 +1,22 @@
+﻿gates:
+  min_trades_rolling_30:
+    threshold: ">= 30"
+    severity: critical
+  min_avg_r_atr_30:
+    threshold: ">= 0.2"
+    severity: critical
+  expectancy_usd_30:
+    threshold: "> 0"
+    severity: critical
+  profit_factor_30:
+    threshold: ">= 1.2"
+    severity: critical
+  max_allowed_dd_pct:
+    threshold: "<= 0.20"
+    severity: critical
+  max_error_rate_pct:
+    threshold: "<= 1.0"
+    severity: warning
+  max_fee_pct_of_pnl:
+    threshold: "<= 0.5"
+    severity: critical

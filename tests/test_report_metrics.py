@@ -1,37 +1,75 @@
+﻿from __future__ import annotations
+
+import json
+import math
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pandas as pd
-import pytest
-
-from auto_trading_bot.reporter import generate_report
 
 
-def make_trades_df():
-    # Four trades with returns: +10%, -5%, +20%, -10%
-    rows = [
-        {"ts": pd.Timestamp("2024-01-01"), "side": "long", "entry": 100.0, "exit": 110.0, "qty": 1.0},
-        {"ts": pd.Timestamp("2024-01-02"), "side": "long", "entry": 100.0, "exit": 95.0, "qty": 1.0},
-        {"ts": pd.Timestamp("2024-01-03"), "side": "long", "entry": 50.0, "exit": 60.0, "qty": 1.0},
-        {"ts": pd.Timestamp("2024-01-04"), "side": "long", "entry": 200.0, "exit": 180.0, "qty": 1.0},
+ROOT = Path(__file__).resolve().parents[1]
+SAMPLES_DIR = ROOT / "reporting" / "samples"
+
+
+def run_report_metrics(env: str, out_dir: Path, csv_glob: Path, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    cmd = [
+        sys.executable,
+        "-m",
+        "reporting.report_metrics",
+        "--env",
+        env,
+        "--out-dir",
+        str(out_dir),
+        "--csv-glob",
+        str(csv_glob),
     ]
-    return pd.DataFrame(rows)
+    env_vars = os.environ.copy()
+    if extra_env:
+        env_vars.update(extra_env)
+    return subprocess.run(cmd, check=True, capture_output=True, text=True, cwd=ROOT, env=env_vars)
 
 
-def test_win_rate_expectancy_mdd():
-    trades = make_trades_df()
-    df = generate_report(trades, config=None)
-    assert len(df) == 1
+def test_report_metrics_generates_artifacts(tmp_path: Path) -> None:
+    out_dir = tmp_path / "reports"
+    result = run_report_metrics("testnet", out_dir, SAMPLES_DIR / "sample_ok.csv")
+    assert "rolling_30" in result.stdout or "rolling_30" in result.stderr
 
-    # Win rate: 2 wins out of 4 = 0.5
-    assert df.loc[0, "win_rate"] == pytest.approx(0.5, rel=1e-6)
+    report_path = out_dir / "testnet" / "latest-summary.json"
+    assert report_path.exists()
 
-    # Expectancy: win_rate*avg_win - loss_rate*avg_loss
-    # avg_win = (0.10 + 0.20)/2 = 0.15
-    # avg_loss = abs((-0.05 + -0.10)/2) = 0.075
-    # expectancy = 0.5*0.15 - 0.5*0.075 = 0.0375
-    assert df.loc[0, "expectancy"] == pytest.approx(0.0375, rel=1e-6)
+    with report_path.open("r", encoding="utf-8") as handle:
+        report = json.load(handle)
 
-    # MDD computed from equity curve of cumulative (1 + r)
-    # Equity after trades: 1.1 -> 1.045 -> 1.254 -> 1.129
-    # Max drawdown from peak 1.254 to 1.129 ~ 0.09968
-    assert df.loc[0, "mdd"] == pytest.approx(0.1, rel=1e-2)
+    for key in ("rolling_windows", "distribution", "fees", "drawdown"):
+        assert key in report
+
+    rolling_30 = report["rolling_windows"]["30"]
+    assert rolling_30["n"] >= 30
+    assert math.isfinite(float(rolling_30["avg_r_atr"]))
+
+    normalized_csv = out_dir / "testnet" / "latest.csv"
+    df = pd.read_csv(normalized_csv)
+    assert "R_atr_expost" in df.columns
 
 
+def test_report_metrics_computes_r_without_column(tmp_path: Path) -> None:
+    df = pd.read_csv(SAMPLES_DIR / "sample_ok.csv")
+    df = df.drop(columns=[col for col in df.columns if col.lower().startswith("r_")])
+    csv_path = tmp_path / "missing_r.csv"
+    df.to_csv(csv_path, index=False)
+
+    out_dir = tmp_path / "reports"
+    run_report_metrics(
+        "fallback",
+        out_dir,
+        csv_path,
+        extra_env={"REPORTING_FORCE_FALLBACK": "1"},
+    )
+
+    normalized_csv = out_dir / "fallback" / "latest.csv"
+    norm = pd.read_csv(normalized_csv)
+    assert "R_atr_expost" in norm.columns
+    assert norm["R_atr_expost"].notna().any(), "R_atr_expost should be computed when missing"
