@@ -1,6 +1,8 @@
 services:
   bot:
     # Development overrides: bind backtest data and keep logs visible
+    # Reintroduce local build context for developers (server will not use this file)
+    build: .
     volumes:
       - ./data:/app/data
       - ./state.json:/app/state.json
