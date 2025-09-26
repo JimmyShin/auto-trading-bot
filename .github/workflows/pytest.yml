@@ -47,21 +47,21 @@ jobs:
       - name: Generate trade report artifacts
         working-directory: ${{ github.workspace }}
         run: |
-          python reporting/report_metrics.py --env ci --csv-glob tests/data/ohlcv/sample.csv --out-dir reporting/out --min-trades 0
+          python reporting/report_metrics.py --input tests/data/ohlcv/sample.csv --output reporting/out
 
       - name: Evaluate Good-To-Go gate
         working-directory: ${{ github.workspace }}
         run: |
-          python reporting/good_to_go_check.py --report reporting/out/ci/latest-summary.json --config reporting/good_to_go_config.yaml
+          python reporting/good_to_go_check.py --report reporting/out/report.json --config reporting/good_to_go_config.yaml
 
       - name: Prepare reporting artifacts
         working-directory: ${{ github.workspace }}
         run: |
           mkdir -p reporting/out/upload
-          cp reporting/out/ci/latest-summary.json reporting/out/upload/report.json
-          cp reporting/out/ci/good_to_go_result.json reporting/out/upload/good_to_go_result.json
-          cp reporting/out/ci/latest-summary.md reporting/out/upload/report.md
-          cp reporting/out/ci/latest.csv reporting/out/upload/report.csv
+          cp reporting/out/report.json reporting/out/upload/report.json
+          cp reporting/out/good_to_go_result.json reporting/out/upload/good_to_go_result.json
+          cp reporting/out/report.md reporting/out/upload/report.md
+          cp reporting/out/report.csv reporting/out/upload/report.csv
 
       - name: Upload reporting artifacts
         uses: actions/upload-artifact@v4
