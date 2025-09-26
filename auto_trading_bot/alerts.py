@@ -1,18 +1,33 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-import os
+# Sample Slack payloads (one-liners):
+# HB ✅ run:abc123 acct:testnet eq:12345.67 rATR30:NA tradesΔ:0 drift:12ms ts:1700000000
+# ✅ EXIT BTC/USDT SHORT run:abc123 acct:testnet pnl:+42.00USDT R:2.10 eq_after:10123.00
+# ⚠️ Clock drift: +7421ms (>5000). Check NTP/exchange time. run:abc123 acct:testnet
+# 🚨 AUTO_TESTNET_ON_DD tripped: dd:12.0% threshold:10.0%. Live entries paused. run:abc123 acct:testnet
+
+import csv
+import glob
 import json
-from typing import Optional, List, Dict, Any, Callable
-
+import logging
+import math
+import os
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple
 
-import glob
-import csv
 import requests
 
 from auto_trading_bot.metrics import get_metrics_manager
+
+logger = logging.getLogger(__name__)
+
+SENTINEL_EXIT_PRICES = {200.25, 200.2500, 0.0}
+EMERGENCY_MIN_WINDOW_SEC = 180.0
+RUN_ID_LENGTH = 7
 
 
 class SlackNotifier:
@@ -26,22 +41,26 @@ class SlackNotifier:
     def enabled(self) -> bool:
         return bool(self.webhook_url)
 
-    def send(self, text: str) -> bool:
+    def send(self, text: str, *, blocks: Optional[List[Dict[str, Any]]] = None) -> bool:
         if not self.enabled():
             return False
+        payload: Dict[str, Any] = {"text": str(text)}
+        if blocks:
+            payload["blocks"] = blocks
         try:
-            payload = {"text": str(text)}
-            resp = requests.post(self.webhook_url, data=json.dumps(payload), headers={"Content-Type": "application/json"}, timeout=5)
+            resp = requests.post(
+                self.webhook_url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=5,
+            )
             return 200 <= resp.status_code < 300
-        except Exception as e:
-            try:
-                print(f"[WARN] Slack notify failed: {e}")
-            except Exception:
-                pass
+        except Exception as exc:
+            logger.warning("Slack notify failed: %s", exc)
             return False
 
 
-_SLACK = None  # lazy singleton
+_SLACK: Optional[SlackNotifier] = None  # lazy singleton
 
 
 def _get_notifier() -> SlackNotifier:
@@ -51,57 +70,241 @@ def _get_notifier() -> SlackNotifier:
     return _SLACK
 
 
-def slack_notify_safely(message: str) -> bool:
-    n = _get_notifier()
-    return n.send(message)
+def _send_with_blocks(sender: Callable[..., bool], text: str, blocks: Optional[List[Dict[str, Any]]] = None) -> bool:
+    try:
+        return sender(text, blocks=blocks)
+    except TypeError:
+        if blocks:
+            return sender(text)
+        raise
+
+
+def slack_notify_safely(message: str, *, blocks: Optional[List[Dict[str, Any]]] = None) -> bool:
+    notifier = _get_notifier()
+    if not blocks:
+        return notifier.send(message)
+    if notifier.send(message, blocks=blocks):
+        return True
+    return notifier.send(message)
+
+
+@dataclass
+class AlertContext:
+    account_label: str
+    server_env: str
+    run_id: str
+    slack_prefix: str = ""
+
+    def format_text(self, text: str) -> str:
+        parts: List[str] = []
+        if self.slack_prefix:
+            parts.append(self.slack_prefix.strip())
+        if self.server_env and self.server_env.lower() != "prod":
+            parts.append(f"[{self.server_env}]")
+        prefix = " ".join(parts)
+        if prefix:
+            return f"{prefix} {text}"
+        return text
+
+    def thread_key(self, event_type: str) -> str:
+        return f"{self.run_id}:{event_type}"
+
+
+def _generate_run_id() -> str:
+    for candidate in (os.getenv("OBS_RUN_ID"), os.getenv("RUN_ID"), os.getenv("GITHUB_SHA")):
+        if candidate:
+            candidate = candidate.strip()
+            if candidate:
+                return candidate[:RUN_ID_LENGTH]
+    return format(int(time.time()), "x")[:RUN_ID_LENGTH]
+
+
+def _load_context() -> AlertContext:
+    try:
+        import config as cfg
+
+        obs = getattr(cfg, "OBSERVABILITY", {}) or {}
+    except Exception:
+        cfg = None
+        obs = {}
+
+    allowed_envs = {"prod", "staging", "dev", "local"}
+    server_env_value = os.getenv("OBS_SERVER_ENV") or obs.get("server_env")
+    if not server_env_value and cfg and hasattr(cfg, "OBS_SERVER_ENV"):
+        server_env_value = getattr(cfg, "OBS_SERVER_ENV")
+    server_env = (server_env_value or "local").strip().lower()
+    if server_env not in allowed_envs:
+        server_env = "local"
+
+    env_account = os.getenv("OBS_ACCOUNT_LABEL")
+    if env_account is not None:
+        raw_account = env_account.strip()
+    else:
+        obs_account = obs.get("account_label") if obs else ""
+        candidate = str(obs_account or (getattr(cfg, "OBS_ACCOUNT_LABEL", "") if cfg and hasattr(cfg, "OBS_ACCOUNT_LABEL") else "")).strip()
+        if candidate and not (candidate.lower() == "live" and server_env != "prod"):
+            raw_account = candidate
+        else:
+            raw_account = ""
+
+    if raw_account:
+        account = raw_account
+    else:
+        if cfg and hasattr(cfg, "TESTNET"):
+            testnet_flag = bool(getattr(cfg, "TESTNET"))
+        else:
+            testnet_flag = os.getenv("TESTNET", "true").strip().lower() in {"1", "true", "yes", "on"}
+        if testnet_flag:
+            account = "testnet"
+        elif server_env == "prod":
+            account = "live"
+        else:
+            account = "testnet"
+
+    env_slack_prefix = os.getenv("OBS_SLACK_PREFIX")
+    if env_slack_prefix is not None:
+        slack_prefix = env_slack_prefix.strip()
+    else:
+        slack_prefix = str(obs.get("slack_prefix") or (getattr(cfg, "OBS_SLACK_PREFIX", "") if cfg and hasattr(cfg, "OBS_SLACK_PREFIX") else "")).strip()
+
+    run_id = _generate_run_id()
+    return AlertContext(account_label=account, server_env=server_env, run_id=run_id, slack_prefix=slack_prefix)
+
+
+CONTEXT = _load_context()
+
+
+def _is_nan(value: Any) -> bool:
+    try:
+        return math.isnan(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _format_decimal(value: Optional[Any], digits: int = 2, fallback: str = "NA") -> str:
+    if value is None:
+        return fallback
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if not math.isfinite(val):
+        return fallback
+    return f"{val:.{digits}f}"
+
+
+def _format_int(value: Optional[Any], fallback: str = "NA") -> str:
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if not math.isfinite(val):
+        return fallback
+    return str(int(round(val)))
+
+
+def _format_percent(value: Optional[Any], digits: int = 1, fallback: str = "NA") -> str:
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if not math.isfinite(val):
+        return fallback
+    return f"{val * 100:.{digits}f}%"
+
+
+def _format_signed(value: Optional[Any], digits: int = 2, suffix: str = "", fallback: str = "NA") -> str:
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if not math.isfinite(val):
+        return fallback
+    sign = "+" if val >= 0 else ""
+    return f"{sign}{val:.{digits}f}{suffix}"
+
+
+def _parse_timestamp(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
+        try:
+            return datetime.strptime(value.replace("Z", ""), fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _format_duration(seconds: Optional[float]) -> str:
+    if seconds is None or not math.isfinite(seconds) or seconds < 0:
+        return "NA"
+    seconds = int(seconds)
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    parts: List[str] = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if not parts:
+        parts.append(f"{sec}s")
+    return ''.join(parts)
 
 
 def _collect_closed_trades(base_dir: str, env: str) -> List[Dict[str, Any]]:
-    """Collect closed trades across data/<env>/trades_*.csv.
-
-    Returns rows with side, entry_price, exit_price, qty, R_atr_expost, R_usd_expost,
-    pnl_quote_expost, stop_basis, exit_ts_utc. Ignores incomplete rows.
-    """
+    """Collect closed trades across data/<env>/trades_*.csv."""
     root = os.path.join(base_dir, env)
     patterns = [os.path.join(root, "trades_*.csv")]
     files: List[str] = []
     for pat in patterns:
         files.extend(sorted(glob.glob(pat)))
     out: List[Dict[str, Any]] = []
-    for p in files:
+    for path in files:
         try:
-            with open(p, "r", encoding="utf-8", newline="") as fh:
-                r = csv.DictReader(fh)
-                for row in r:
+            with open(path, "r", encoding="utf-8", newline="") as fh:
+                reader = csv.DictReader(fh)
+                for row in reader:
                     if (row.get("status") or "").upper() != "CLOSED":
                         continue
                     try:
                         entry = float(row.get("entry_price") or 0.0)
-                        exitp = float(row.get("exit_price") or 0.0)
+                        exit_price = float(row.get("exit_price") or 0.0)
                         qty = float(row.get("qty") or 0.0)
                     except Exception:
                         continue
-                    if entry <= 0 or exitp <= 0:
+                    if entry <= 0 or exit_price <= 0:
                         continue
                     side = (row.get("side") or "").strip().lower()
-                    def _fnum(x):
+
+                    def _safe_num(key: str) -> Optional[float]:
                         try:
-                            return float(x)
+                            return float(row.get(key) or "")
                         except Exception:
                             return None
+
                     out.append({
                         "symbol": row.get("symbol") or "",
                         "side": side,
                         "entry_price": entry,
-                        "exit_price": exitp,
+                        "exit_price": exit_price,
                         "qty": qty,
-                        "entry_atr_abs": _fnum(row.get("entry_atr_abs")),
-                        "stop_k": _fnum(row.get("stop_k")),
-                        "stop_basis": (row.get("stop_basis") or "").strip().lower(),
-                        "R_atr_expost": _fnum(row.get("R_atr_expost")),
-                        "R_usd_expost": _fnum(row.get("R_usd_expost")),
-                        "pnl_quote_expost": _fnum(row.get("pnl_quote_expost")),
+                        "entry_ts_utc": row.get("entry_ts_utc") or row.get("entry_timestamp") or "",
                         "exit_ts_utc": row.get("exit_ts_utc") or row.get("exit_timestamp") or "",
+                        "R_atr_expost": _safe_num("R_atr_expost"),
+                        "R_usd_expost": _safe_num("R_usd_expost"),
+                        "pnl_quote_expost": _safe_num("pnl_quote_expost"),
+                        "fees_quote_actual": _safe_num("fees_quote_actual"),
+                        "stop_k": _safe_num("stop_k"),
+                        "entry_atr_abs": _safe_num("entry_atr_abs"),
                     })
         except Exception:
             continue
@@ -121,33 +324,21 @@ def _rolling_metrics_from_logs(base_dir: str, env: str, window: int = 30, rows: 
                 "fallback_percent_count": 0,
                 "N": 0,
             }
-        import pandas as pd
+        import pandas as pd  # type: ignore
         from auto_trading_bot.reporter import generate_report
+
         df = pd.DataFrame(rows)
-        try:
-            if "exit_ts_utc" in df.columns:
-                df = df.sort_values(by="exit_ts_utc")
-        except Exception:
-            pass
-        dfw = df.tail(window)
-        rep = generate_report(dfw).iloc[0]
-        win_rate_pct = float(rep.get("win_rate", 0.0)) * 100.0
-        avg_r_atr = rep.get("avg_r_atr")
-        avg_r_usd = rep.get("avg_r_usd")
-        expectancy_usd = rep.get("expectancy_usd", 0.0)
-        fallback_count = int(rep.get("fallback_percent_count", 0))
-        def _nan_to_none(v):
-            try:
-                return None if (isinstance(v, float) and v != v) else v
-            except Exception:
-                return v
+        if len(df) > window:
+            df = df.tail(window)
+        report = generate_report(df)
+        data = report.iloc[0].to_dict() if not report.empty else {}
         return {
-            "win_rate_pct": float(win_rate_pct),
-            "avg_r_atr": _nan_to_none(avg_r_atr),
-            "avg_r_usd": _nan_to_none(avg_r_usd),
-            "expectancy_usd": float(expectancy_usd) if expectancy_usd is not None else 0.0,
-            "fallback_percent_count": fallback_count,
-            "N": int(len(dfw)),
+            "win_rate_pct": float(data.get("win_rate", 0.0)) * 100.0,
+            "avg_r_atr": data.get("avg_r_atr"),
+            "avg_r_usd": data.get("avg_r_usd"),
+            "expectancy_usd": float(data.get("expectancy_usd", 0.0)),
+            "fallback_percent_count": int(data.get("fallback_percent_count", 0)),
+            "N": len(df),
         }
     except Exception:
         return {
@@ -160,30 +351,45 @@ def _rolling_metrics_from_logs(base_dir: str, env: str, window: int = 30, rows: 
         }
 
 
-def _compute_latest_r_atr(symbol: str, side: str, entry_price: float, exit_price: float, rows: List[Dict[str, Any]]) -> Optional[float]:
-    """Compute immediate R_atr using latest trade snapshot for the symbol."""
-    if not rows:
-        return None
-    symbol = (symbol or "").strip()
-    side_norm = (side or "").strip().lower()
-    symbol_norm = symbol.upper()
+def _compute_latest_r_atr(symbol: str, side: str, entry_price: float, exit_price: float, rows: Iterable[Dict[str, Any]]) -> Optional[float]:
+    mult = 1.0 if (side or "").lower() == "long" else -1.0
+    for row in reversed(list(rows)):
+        if row.get("symbol") != symbol:
+            continue
+        try:
+            stop_k = float(row.get("stop_k") or 0.0)
+            atr_abs = float(row.get("entry_atr_abs") or 0.0)
+        except Exception:
+            continue
+        denom = stop_k * atr_abs
+        if denom <= 0:
+            continue
+        pnl_dist = (exit_price - entry_price) * mult
+        return pnl_dist / denom
+    return None
+
+
+def _extract_trade_record(symbol: str, side: str, rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    side = (side or "").lower()
     for row in reversed(rows):
-        if (row.get("symbol") or "").upper() != symbol_norm:
-            continue
-        if (row.get("side") or "").lower() != side_norm:
-            continue
-        entry_atr = row.get("entry_atr_abs")
-        stop_k = row.get("stop_k")
-        if entry_atr in (None, 0, 0.0) or stop_k in (None, 0, 0.0):
-            continue
-        denom = float(stop_k) * float(entry_atr)
-        if denom == 0:
-            continue
-        if side_norm == "long":
-            pnl_distance = float(exit_price) - float(entry_price)
-        else:
-            pnl_distance = float(entry_price) - float(exit_price)
-        return pnl_distance / denom
+        if row.get("symbol") == symbol and (row.get("side") or "").lower() == side:
+            return row
+    return None
+
+
+def _derive_fill_id(record: Dict[str, Any]) -> Optional[str]:
+    for key in ("exit_ts_utc", "exit_timestamp"):
+        val = record.get(key)
+        if val:
+            return str(val)
+    return None
+
+
+def _compute_holding_seconds(record: Dict[str, Any]) -> Optional[float]:
+    entry_ts = _parse_timestamp(str(record.get("entry_ts_utc") or ""))
+    exit_ts = _parse_timestamp(str(record.get("exit_ts_utc") or ""))
+    if entry_ts and exit_ts:
+        return (exit_ts - entry_ts).total_seconds()
     return None
 
 
@@ -196,13 +402,22 @@ def slack_notify_exit(
     pnl_usdt: float,
     pnl_pct: float,
     equity_usdt: float,
+    *,
+    fill_id: Optional[str] = None,
+    fill_source: str = "exchange",
+    fees_quote: Optional[float] = None,
+    sender: Optional[Callable[..., bool]] = None,
 ) -> bool:
-    """Send a Slack message about a position exit.
+    """Send a Slack message about a confirmed exit."""
+    if exit_price in SENTINEL_EXIT_PRICES:
+        logger.warning("Suppressing exit slack for sentinel exit price %s", exit_price)
+        return False
 
-    Uses rolling (N=30) metrics. Avg R shows ATR-based only; no fallbacks.
-    """
+    sender = sender or slack_notify_safely
+
     try:
         import config as cfg
+
         env = "testnet" if getattr(cfg, "TESTNET", True) else "live"
         base_dir = getattr(cfg, "DATA_BASE_DIR", "data")
     except Exception:
@@ -210,39 +425,95 @@ def slack_notify_exit(
         base_dir = "data"
 
     rows = _collect_closed_trades(base_dir, env)
-    metrics = _rolling_metrics_from_logs(base_dir, env, window=30, rows=rows)
-    win_rate_pct = metrics.get("win_rate_pct", 0.0)
-    avg_r_atr = metrics.get("avg_r_atr", None)
-    expectancy_usd = metrics.get("expectancy_usd", 0.0)
-    fallback_count = int(metrics.get("fallback_percent_count", 0))
-    N = int(metrics.get("N", 0))
+    record = _extract_trade_record(symbol, side, rows) if rows else None
+    if record is None:
+        logger.warning("Suppressing exit slack for %s %s: no trade record", symbol, side)
+        return False
 
-    side_disp = (side or "").upper()
-    computed_r = _compute_latest_r_atr(symbol, side, entry_price, exit_price, rows)
-    use_direct_r = (avg_r_atr is None or (isinstance(avg_r_atr, float) and avg_r_atr != avg_r_atr)) or N <= 1
-    if use_direct_r and computed_r is not None:
-        avg_r_value = computed_r
-    else:
-        avg_r_value = avg_r_atr if avg_r_atr is not None else computed_r
-    avg_r_text = "N/A"
-    if avg_r_value is not None and not (isinstance(avg_r_value, float) and avg_r_value != avg_r_value):
-        avg_r_text = f"{float(avg_r_value):.3f}"
-    dd_text = "N/A"  # daily drawdown not provided here
-    msg = (
-        f":white_check_mark: EXIT {symbol} {side_disp}\n"
-        f"Entry: {entry_price:.4f} -> Exit: {exit_price:.4f}\n"
-        f"PnL: {pnl_usdt:.2f} USDT ({pnl_pct:.2f}%)\n"
-        f"Win rate(30): {win_rate_pct:.2f}% | Avg R: {avg_r_text} | Exp(USD 30): {float(expectancy_usd):.2f}\n"
-        f"Equity: ${equity_usdt:,.2f} | DD: {dd_text}\n"
-        f"fallback_trades_30: {fallback_count}/{N}"
+    derived_fill_id = fill_id or _derive_fill_id(record)
+    if not derived_fill_id:
+        logger.warning("Suppressing exit slack for %s %s: missing fill id", symbol, side)
+        return False
+
+    trade_qty = record.get("qty") or qty
+    try:
+        trade_qty = float(trade_qty)
+    except Exception:
+        trade_qty = qty
+    if not trade_qty or trade_qty <= 0:
+        logger.warning("Suppressing exit slack for %s %s: invalid qty", symbol, side)
+        return False
+
+    r_trade = record.get("R_atr_expost")
+    if r_trade is None or _is_nan(r_trade):
+        r_trade = _compute_latest_r_atr(symbol, side, entry_price, exit_price, rows)
+
+    avg_metrics = _rolling_metrics_from_logs(base_dir, env, rows=rows)
+    holding_seconds = _compute_holding_seconds(record)
+    fees_value = fees_quote if fees_quote is not None else record.get("fees_quote_actual")
+
+    message = (
+        f"✅ EXIT {symbol} {side.upper()} run:{CONTEXT.run_id} acct:{CONTEXT.account_label} "
+        f"pnl:{_format_signed(pnl_usdt, suffix='USDT')} R:{_format_decimal(r_trade, digits=2)} "
+        f"eq_after:{_format_decimal(equity_usdt, digits=2)}"
     )
+
+    blocks: List[Dict[str, Any]] = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": f"✅ EXIT {symbol} {side.upper()}", "emoji": True},
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Entry*\n{_format_decimal(entry_price, 4)}"},
+                {"type": "mrkdwn", "text": f"*Exit*\n{_format_decimal(exit_price, 4)}"},
+                {"type": "mrkdwn", "text": f"*PnL_quote*\n{_format_signed(pnl_usdt, suffix=' USDT')}"},
+                {"type": "mrkdwn", "text": f"*R*\n{_format_decimal(r_trade, 2)}"},
+                {"type": "mrkdwn", "text": f"*Holding*\n{_format_duration(holding_seconds)}"},
+                {"type": "mrkdwn", "text": f"*Fees*\n{_format_decimal(fees_value, 2)}"},
+                {"type": "mrkdwn", "text": f"*Equity_after*\n{_format_decimal(equity_usdt, 2)}"},
+            ],
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"run:{CONTEXT.run_id} acct:{CONTEXT.account_label} "
+                        f"thread:{CONTEXT.thread_key('EXIT')} source:{fill_source}"
+                    ),
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"fill_id:{derived_fill_id}",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"AvgR30:{_format_decimal(avg_metrics.get('avg_r_atr'), 2)}",
+                },
+            ],
+        },
+    ]
+
     metrics_mgr = get_metrics_manager()
     if metrics_mgr:
         try:
-            metrics_mgr.set_avg_r(float(avg_r_value) if avg_r_value is not None else float("nan"))
+            metrics_mgr.set_avg_r(float(r_trade) if r_trade is not None else float("nan"))
         except Exception:
             pass
-    return slack_notify_safely(msg)
+
+    formatted = CONTEXT.format_text(message)
+    return _send_with_blocks(sender, formatted, blocks=blocks)
+
+
+@dataclass
+class EmergencyState:
+    fail_count: int = 0
+    first_fail_ts: Optional[float] = None
+    last_alert_ts: Optional[float] = None
+    last_alert_severity: Optional[float] = None
 
 
 class AlertScheduler(threading.Thread):
@@ -252,7 +523,7 @@ class AlertScheduler(threading.Thread):
         self,
         metrics_manager,
         config: Dict[str, Any],
-        slack_sender: Callable[[str], bool] = slack_notify_safely,
+        slack_sender: Callable[..., bool] = slack_notify_safely,
         *,
         interval_sec: float = 60.0,
         now_fn: Optional[Callable[[], float]] = None,
@@ -264,11 +535,11 @@ class AlertScheduler(threading.Thread):
         self.interval = interval_sec
         self.now_fn = now_fn or time.time
         self.cooldowns: Dict[str, float] = {}
+        self.emergencies: Dict[str, EmergencyState] = {}
         self.last_heartbeat_sent = 0.0
-        self.last_heartbeat_trades = 0.0
-        self.error_history: deque = deque()
-        self.activity_history: deque = deque()
-        self.drift_history: deque = deque()
+        self.last_heartbeat_trades: Optional[float] = None
+        self.error_history: Deque[Tuple[float, Dict[str, float]]] = deque()
+        self.activity_history: Deque[Tuple[float, float, Optional[float]]] = deque()
         self._prev_error_totals: Dict[str, float] = {}
 
     # Thread loop ---------------------------------------------------------
@@ -283,27 +554,35 @@ class AlertScheduler(threading.Thread):
         snapshot = self.metrics.get_snapshot() if self.metrics else {}
         self._record_histories(now, snapshot)
         self._send_heartbeat_if_needed(now, snapshot)
-        self._check_heartbeat_missing(now, snapshot)
-        self._check_clock_drift(now)
+        self._check_clock_drift(now, snapshot)
         self._check_error_burst(now)
         self._check_no_trade(now)
+        self._check_auto_testnet(now, snapshot)
 
     # Internal helpers ----------------------------------------------------
     def _record_histories(self, now: float, snap: Dict[str, Any]) -> None:
-        signal_totals = snap.get("signal_totals", {}) or {}
-        total_signals = float(sum(signal_totals.values()))
-        trade_total = float(snap.get("trade_total", 0.0))
+        signal_totals = snap.get("signal_totals") or {}
+        total_signals = float(sum(signal_totals.values())) if signal_totals else 0.0
+        trade_total_raw = snap.get("trade_total")
+        trade_total: Optional[float]
+        if trade_total_raw is None:
+            trade_total = None
+        else:
+            try:
+                trade_total = float(trade_total_raw)
+            except (TypeError, ValueError):
+                trade_total = None
         self.activity_history.append((now, total_signals, trade_total))
         window = float(self.config.get("no_trade_window_sec", 7200))
         while self.activity_history and now - self.activity_history[0][0] > window:
             self.activity_history.popleft()
 
-        current_errors = {k: float(v) for k, v in (snap.get("order_errors", {}) or {}).items()}
+        current_errors = {k: float(v) for k, v in (snap.get("order_errors") or {}).items()}
         delta_errors: Dict[str, float] = {}
         for reason, total in current_errors.items():
             previous = float(self._prev_error_totals.get(reason, 0.0))
-            delta = max(0.0, total - previous)
-            if delta:
+            delta = total - previous
+            if delta > 0:
                 delta_errors[reason] = delta
         self.error_history.append((now, delta_errors))
         self._prev_error_totals = current_errors
@@ -311,15 +590,18 @@ class AlertScheduler(threading.Thread):
         while self.error_history and now - self.error_history[0][0] > error_window:
             self.error_history.popleft()
 
-        drift_map = snap.get("time_drift", {}) or {}
-        if "exchange" in drift_map:
-            self.drift_history.append((now, float(drift_map["exchange"])))
-        drift_window = 180.0
-        while self.drift_history and now - self.drift_history[0][0] > drift_window:
-            self.drift_history.popleft()
-
-        # Update cached heartbeat time if snapshot provided
-        # No-op: heartbeat timestamp used in downstream checks
+    def _signal_trade_delta(self) -> Tuple[Optional[float], Optional[float]]:
+        if not self.activity_history:
+            return None, None
+        start_sig = self.activity_history[0][1]
+        end_sig = self.activity_history[-1][1]
+        signals_delta = end_sig - start_sig
+        start_trade = self.activity_history[0][2]
+        end_trade = self.activity_history[-1][2]
+        trades_delta = None
+        if start_trade is not None and end_trade is not None:
+            trades_delta = end_trade - start_trade
+        return signals_delta, trades_delta
 
     def _send_heartbeat_if_needed(self, now: float, snap: Dict[str, Any]) -> None:
         interval = float(self.config.get("heartbeat_interval_sec", 43200))
@@ -327,51 +609,165 @@ class AlertScheduler(threading.Thread):
             return
         if now - self.last_heartbeat_sent < interval:
             return
-        account = self.config.get("account_label", "live")
-        run_id = (os.getenv("GITHUB_SHA") or os.getenv("RUN_ID") or "local")[:7]
-        equity = float(snap.get("equity", 0.0))
-        avg_r = snap.get("avg_r", float("nan"))
-        avg_r_text = "N/A" if isinstance(avg_r, float) and avg_r != avg_r else f"{avg_r:.3f}"
-        trade_total = float(snap.get("trade_total", 0.0))
-        trade_delta = trade_total - self.last_heartbeat_trades
-        heartbeat_ts = float(snap.get("heartbeat_ts", now))
+
+        equity_text = _format_decimal(snap.get("equity"), digits=2)
+        avg_r_text = _format_decimal(snap.get("avg_r"), digits=2)
+
+        trade_total_raw = snap.get("trade_total")
+        trade_delta_text = "NA"
+        trade_total_val: Optional[float] = None
+        if trade_total_raw is not None:
+            try:
+                trade_total_val = float(trade_total_raw)
+                baseline = self.last_heartbeat_trades if self.last_heartbeat_trades is not None else trade_total_val
+                delta = max(0.0, trade_total_val - baseline)
+                trade_delta_text = _format_int(delta, fallback="0")
+            except (TypeError, ValueError):
+                trade_total_val = None
+
+        drift_val = (snap.get("time_drift") or {}).get("exchange")
+        drift_text = _format_int(drift_val)
+
+        ts_value = snap.get("heartbeat_ts") or now
+        ts_text = _format_int(ts_value, fallback=str(int(now)))
+
+        signals_delta, trades_delta_window = self._signal_trade_delta()
+        signals_text = _format_int(signals_delta, fallback="0" if signals_delta is not None else "NA")
+        trades_window_text = _format_int(trades_delta_window, fallback="0" if trades_delta_window is not None else "NA")
+        dd_text = _format_percent(snap.get("daily_dd"), digits=1)
+
         message = (
-            f"HB ✅ run:{run_id} account:{account} eq:{equity:.2f} avgR(ATR30):{avg_r_text} "
-            f"tradesΔ:{int(trade_delta)} ts:{int(heartbeat_ts)}"
+            f"HB ✅ run:{CONTEXT.run_id} acct:{CONTEXT.account_label} "
+            f"eq:{equity_text} rATR30:{avg_r_text} tradesΔ:{trade_delta_text} "
+            f"drift:{drift_text}ms ts:{ts_text}"
         )
-        if self.slack(message):
+
+        blocks: List[Dict[str, Any]] = [
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*Equity*\n{equity_text}"},
+                    {"type": "mrkdwn", "text": f"*Daily DD*\n{dd_text}"},
+                    {"type": "mrkdwn", "text": f"*Avg R(30)*\n{avg_r_text}"},
+                    {"type": "mrkdwn", "text": f"*Trades Δ*\n{trade_delta_text}"},
+                    {"type": "mrkdwn", "text": f"*Signals Δ*\n{signals_text}"},
+                    {"type": "mrkdwn", "text": f"*Window trades*\n{trades_window_text}"},
+                ],
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"run:{CONTEXT.run_id} acct:{CONTEXT.account_label} thread:{CONTEXT.thread_key('HB')}",
+                    }
+                ],
+            },
+        ]
+
+        formatted = CONTEXT.format_text(message)
+        if _send_with_blocks(self.slack, formatted, blocks=blocks):
             self.last_heartbeat_sent = now
-            self.last_heartbeat_trades = trade_total
+            if trade_total_val is not None:
+                self.last_heartbeat_trades = trade_total_val
+        else:
+            if trade_total_val is not None:
+                self.last_heartbeat_trades = trade_total_val
 
-    def _check_heartbeat_missing(self, now: float, snap: Dict[str, Any]) -> None:
-        missing_sec = float(self.config.get("heartbeat_missing_sec", 64800))
-        heartbeat_ts = float(snap.get("heartbeat_ts", 0.0))
-        if not heartbeat_ts:
-            return
-        if now - heartbeat_ts <= missing_sec:
-            return
-        if self._should_alert("heartbeat_missing", now):
-            self.slack("⚠️ Heartbeat missing: no updates in the last period. Check bot loop/metrics.")
+    def _reset_emergency(self, event_type: str) -> None:
+        key = f"{event_type}:{CONTEXT.account_label}"
+        state = self.emergencies.get(key)
+        if state:
+            state.fail_count = 0
+            state.first_fail_ts = None
 
-    def _check_clock_drift(self, now: float) -> None:
-        if not self.drift_history:
+    def _handle_emergency(
+        self,
+        event_type: str,
+        *,
+        severity: float,
+        now: float,
+        message: str,
+        fields: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        key = f"{event_type}:{CONTEXT.account_label}"
+        state = self.emergencies.setdefault(key, EmergencyState())
+        if state.fail_count == 0:
+            state.first_fail_ts = now
+        state.fail_count += 1
+
+        if state.fail_count < 3:
+            return
+        if state.first_fail_ts is None or now - state.first_fail_ts < EMERGENCY_MIN_WINDOW_SEC:
+            return
+
+        cooldown = float(self.config.get("alert_cooldown_sec", 600))
+        within_cooldown = state.last_alert_ts is not None and (now - state.last_alert_ts) < cooldown
+        severity_escalated = state.last_alert_severity is not None and severity > state.last_alert_severity
+        if within_cooldown and not severity_escalated:
+            return
+
+        blocks = None
+        if fields:
+            blocks = [
+                {"type": "section", "fields": fields},
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "mrkdwn",
+                            "text": (
+                                f"run:{CONTEXT.run_id} acct:{CONTEXT.account_label} "
+                                f"thread:{CONTEXT.thread_key('EMERG')} type:{event_type}"
+                            ),
+                        },
+                        {
+                            "type": "mrkdwn",
+                            "text": f"severity:{_format_decimal(severity, 2)}",
+                        },
+                    ],
+                },
+            ]
+
+        formatted = CONTEXT.format_text(message)
+        if _send_with_blocks(self.slack, formatted, blocks=blocks):
+            state.last_alert_ts = now
+            state.last_alert_severity = severity
+            state.fail_count = 0
+            state.first_fail_ts = None
+            self.cooldowns[key] = now
+
+    def _check_clock_drift(self, now: float, snap: Dict[str, Any]) -> None:
+        drift_val = (snap.get("time_drift") or {}).get("exchange")
+        try:
+            drift_float = float(drift_val)
+        except (TypeError, ValueError):
+            self._reset_emergency("clock_drift")
+            return
+        if not math.isfinite(drift_float):
+            self._reset_emergency("clock_drift")
             return
         threshold = float(self.config.get("clock_drift_warn_ms", 5000.0))
-        window = 180.0
-        recent = [entry for entry in self.drift_history if now - entry[0] <= window]
-        if len(recent) < max(3, int(window // max(self.interval, 1))):
+        if abs(drift_float) < threshold:
+            self._reset_emergency("clock_drift")
             return
-        if all(abs(val) >= threshold for _, val in recent):
-            latest = recent[-1][1]
-            if self._should_alert("clock_drift", now):
-                direction = "+" if latest >= 0 else ""
-                self.slack(f"⚠️ Clock drift: {direction}{int(latest)}ms (>{int(threshold)}). Check NTP/exchange sync.")
+        direction = "+" if drift_float >= 0 else ""
+        message = (
+            f"⚠️ Clock drift: {direction}{int(drift_float)}ms (>{int(threshold)}). "
+            f"Check NTP/exchange time. run:{CONTEXT.run_id} acct:{CONTEXT.account_label}"
+        )
+        fields = [
+            {"type": "mrkdwn", "text": f"*Drift*\n{direction}{int(drift_float)} ms"},
+            {"type": "mrkdwn", "text": f"*Threshold*\n{int(threshold)} ms"},
+        ]
+        self._handle_emergency("clock_drift", severity=abs(drift_float), now=now, message=message, fields=fields)
 
     def _check_error_burst(self, now: float) -> None:
         if not self.error_history:
+            self._reset_emergency("error_burst")
             return
-        threshold = float(self.config.get("error_burst_threshold", 10))
-        window = float(self.config.get("error_burst_window_sec", 300))
+        window = float(self.config.get("error_burst_window_sec", 300.0))
+        threshold = float(self.config.get("error_burst_threshold", 10.0))
         totals: Dict[str, float] = {}
         total_errors = 0.0
         for ts, delta_map in self.error_history:
@@ -380,47 +776,86 @@ class AlertScheduler(threading.Thread):
             for reason, value in delta_map.items():
                 totals[reason] = totals.get(reason, 0.0) + value
                 total_errors += value
-        if total_errors >= threshold and self._should_alert("error_burst", now):
-            top_reason = max(totals.items(), key=lambda item: item[1])[0] if totals else "unknown"
-            self.slack(
-                f"⚠️ Error burst: {int(total_errors)} errors/{int(window/60)}m ({top_reason}). Investigate failures."
-            )
+        if total_errors < threshold:
+            self._reset_emergency("error_burst")
+            return
+        top_reason = max(totals.items(), key=lambda item: item[1])[0] if totals else "unknown"
+        message = (
+            f"⚠️ Error burst: {int(total_errors)} errors/{int(window/60)}m ({top_reason}). "
+            f"run:{CONTEXT.run_id} acct:{CONTEXT.account_label}"
+        )
+        fields = [
+            {"type": "mrkdwn", "text": f"*Total*\n{int(total_errors)}"},
+            {"type": "mrkdwn", "text": f"*Window*\n{int(window/60)} m"},
+            {"type": "mrkdwn", "text": f"*Top reason*\n{top_reason}"},
+        ]
+        self._handle_emergency("error_burst", severity=total_errors, now=now, message=message, fields=fields)
 
     def _check_no_trade(self, now: float) -> None:
-        if not self.activity_history:
+        if len(self.activity_history) < 2:
+            self._reset_emergency("no_trade")
             return
         window = float(self.config.get("no_trade_window_sec", 7200))
         min_signals = float(self.config.get("no_trade_signals_min", 5))
-        signals_start, trades_start = None, None
-        for ts, sig_total, trade_total in self.activity_history:
-            if now - ts <= window:
-                signals_start = sig_total if signals_start is None else signals_start
-                trades_start = trade_total if trades_start is None else trades_start
-                break
-        if signals_start is None or trades_start is None:
+        signals_delta, trades_delta = self._signal_trade_delta()
+        if signals_delta is None or signals_delta < min_signals:
+            self._reset_emergency("no_trade")
             return
-        _, signals_end, trades_end = self.activity_history[-1]
-        signal_delta = signals_end - signals_start
-        trade_delta = trades_end - trades_start
-        if signal_delta >= min_signals and trade_delta <= 0 and self._should_alert("no_trade", now):
-            self.slack(
-                f"⚠️ Signals: {int(signal_delta)} in {int(window/3600)}h but no trades. Review filters/routing."
-            )
+        if trades_delta is not None and trades_delta > 0:
+            self._reset_emergency("no_trade")
+            return
+        hours = max(1, int(window / 3600))
+        message = (
+            f"⚠️ Signals: {int(signals_delta)} in {hours}h but 0 trades. "
+            f"Check filters/routing. run:{CONTEXT.run_id} acct:{CONTEXT.account_label}"
+        )
+        fields = [
+            {"type": "mrkdwn", "text": f"*Signals*\n{int(signals_delta)}"},
+            {"type": "mrkdwn", "text": f"*Trades*\n{_format_int(trades_delta, fallback='0')}"},
+            {"type": "mrkdwn", "text": f"*Window*\n{hours} h"},
+        ]
+        self._handle_emergency("no_trade", severity=signals_delta or 0.0, now=now, message=message, fields=fields)
 
-    def _should_alert(self, key: str, now: float) -> bool:
-        cooldown = float(self.config.get("alert_cooldown_sec", 600))
-        last = self.cooldowns.get(key)
-        if last is not None and now - last < cooldown:
-            return False
-        self.cooldowns[key] = now
-        return True
+    def _check_auto_testnet(self, now: float, snap: Dict[str, Any]) -> None:
+        dd_value = snap.get("daily_dd")
+        try:
+            dd_float = float(dd_value)
+        except (TypeError, ValueError):
+            self._reset_emergency("auto_testnet_on_dd")
+            return
+        if not math.isfinite(dd_float):
+            self._reset_emergency("auto_testnet_on_dd")
+            return
+        try:
+            import config as cfg
+
+            auto_enabled = bool(getattr(cfg, "AUTO_TESTNET_ON_DD", False))
+            threshold = float(getattr(cfg, "DAILY_DD_LIMIT", 0.05))
+        except Exception:
+            auto_enabled = False
+            threshold = 0.0
+        if not auto_enabled:
+            self._reset_emergency("auto_testnet_on_dd")
+            return
+        if dd_float < threshold:
+            self._reset_emergency("auto_testnet_on_dd")
+            return
+        message = (
+            f"🚨 AUTO_TESTNET_ON_DD tripped: dd:{dd_float:.1%} threshold:{threshold:.1%}. "
+            f"Live entries paused. run:{CONTEXT.run_id} acct:{CONTEXT.account_label}"
+        )
+        fields = [
+            {"type": "mrkdwn", "text": f"*Drawdown*\n{_format_percent(dd_float, digits=1)}"},
+            {"type": "mrkdwn", "text": f"*Threshold*\n{_format_percent(threshold, digits=1)}"},
+        ]
+        self._handle_emergency("auto_testnet_on_dd", severity=dd_float, now=now, message=message, fields=fields)
 
 
 def start_alert_scheduler(
     config: Dict[str, Any],
     metrics_manager=None,
     *,
-    slack_sender: Callable[[str], bool] = slack_notify_safely,
+    slack_sender: Callable[..., bool] = slack_notify_safely,
     interval_sec: float = 60.0,
 ) -> AlertScheduler:
     scheduler = AlertScheduler(metrics_manager or get_metrics_manager(), config, slack_sender, interval_sec=interval_sec)
