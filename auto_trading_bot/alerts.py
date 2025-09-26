@@ -12,7 +12,7 @@ import glob
 import csv
 import requests
 
-from metrics import get_metrics_manager
+from auto_trading_bot.metrics import get_metrics_manager
 
 
 class SlackNotifier:
@@ -122,7 +122,7 @@ def _rolling_metrics_from_logs(base_dir: str, env: str, window: int = 30, rows: 
                 "N": 0,
             }
         import pandas as pd
-        from reporter import generate_report
+        from auto_trading_bot.reporter import generate_report
         df = pd.DataFrame(rows)
         try:
             if "exit_ts_utc" in df.columns:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 import urllib.request
 
-from metrics import start_metrics_server, get_metrics_manager
+from auto_trading_bot.metrics import start_metrics_server, get_metrics_manager
 
 
 def test_metrics_endpoint_exposes_expected_series():
@@ -31,4 +31,5 @@ def test_metrics_endpoint_exposes_expected_series():
     assert 'bot_signal_emitted_total{symbol="BTC/USDT",timeframe="1h"} 2.0' in body
     assert 'bot_order_errors_total{account="test",reason="auth"} 1.0' in body
     assert 'bot_heartbeat_ts' in body
+
 

@@ -1,7 +1,7 @@
 import os
 from types import SimpleNamespace
 
-import alerts
+from auto_trading_bot import alerts
 
 
 class DummyResp:
@@ -40,4 +40,5 @@ def test_slack_notify_failure(monkeypatch):
         assert ok is False
     finally:
         os.environ.pop("SLACK_WEBHOOK_URL", None)
+
 

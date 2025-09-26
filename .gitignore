@@ -40,3 +40,12 @@ Thumbs.db
 
 # Local config (use config.example.json)
 config.json
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Coverage reports
+htmlcov/

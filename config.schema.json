@@ -1,74 +1,76 @@
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "type": "object",
-  "additionalProperties": false,
-  "properties": {
-    "binance_key": { "type": "string" },
-    "binance_secret": { "type": "string" },
-    "testnet": { "type": "boolean" },
-    "safe_restart": { "type": "boolean" },
-    "quote": { "type": "string" },
-    "universe": { "type": "array", "items": { "type": "string" } },
-    "risk_pct": { "type": "number" },
-    "leverage": { "type": ["number", "integer"] },
-    "enable_pyramiding": { "type": "boolean" },
-    "pyramid_levels": {
-      "type": "array",
-      "items": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } }
-    },
-    "atr_len": { "type": "integer" },
-    "atr_stop_k": { "type": "number" },
-    "atr_trail_k": { "type": "number" },
-    "daily_loss_limit": { "type": "number" },
-    "funding_avoid_min": { "type": "integer" },
-    "daily_dd_limit": { "type": "number" },
-    "poll_sec": { "type": "integer" },
-    "timeframe": { "type": "string" },
-    "lookback": { "type": "integer" },
-    "state_file": { "type": "string" },
-    "data_dir": { "type": "string" },
-    "auto_testnet_on_dd": { "type": "boolean" },
-    "emergency_policy": { "type": "string", "enum": ["protect_only", "flatten_if_safe", "flatten_all"] },
-    "emergency_min_pnl_to_close_pct": { "type": "number" },
-    "emergency_stop_fallback_pct": { "type": "number" },
-    "kill_switch": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "auth_failures": { "type": "integer" },
-        "nonce_errors": { "type": "integer" },
-        "time_drift_sec": { "type": "number" },
-        "max_retries": { "type": "integer" }
-      }
-    },
-    "observability": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "metrics_port": { "type": "integer" },
-        "heartbeat_interval_sec": { "type": "integer" },
-        "heartbeat_missing_sec": { "type": "integer" },
-        "clock_drift_warn_ms": { "type": "number" },
-        "error_burst_threshold": { "type": "integer" },
-        "error_burst_window_sec": { "type": "integer" },
-        "no_trade_signals_min": { "type": "integer" },
-        "no_trade_window_sec": { "type": "integer" },
-        "alert_cooldown_sec": { "type": "integer" },
-        "account_label": { "type": "string" }
-      }
-    },
-    "position_cap": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "multiple": { "type": "number" },
-        "min": { "type": "number" },
-        "max": { "type": "number" }
-      }
-    },
-    "candle_long_max_pos_ratio": { "type": "number" },
-    "candle_short_min_pos_ratio": { "type": "number" },
-    "oversize_tolerance": { "type": "number" },
-    "pyramid_cooldown_bars": { "type": "integer" }
-  }
-}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "binance_key": { "type": "string" },
+    "binance_secret": { "type": "string" },
+    "testnet": { "type": "boolean" },
+    "safe_restart": { "type": "boolean" },
+    "quote": { "type": "string" },
+    "universe": { "type": "array", "items": { "type": "string" } },
+    "risk_pct": { "type": "number" },
+    "leverage": { "type": ["number", "integer"] },
+    "enable_pyramiding": { "type": "boolean" },
+    "pyramid_levels": {
+      "type": "array",
+      "items": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } }
+    },
+    "atr_len": { "type": "integer" },
+    "atr_stop_k": { "type": "number" },
+    "atr_trail_k": { "type": "number" },
+    "daily_loss_limit": { "type": "number" },
+    "funding_avoid_min": { "type": "integer" },
+    "daily_dd_limit": { "type": "number" },
+    "poll_sec": { "type": "integer" },
+    "timeframe": { "type": "string" },
+    "lookback": { "type": "integer" },
+    "state_file": { "type": "string" },
+    "data_dir": { "type": "string" },
+    "auto_testnet_on_dd": { "type": "boolean" },
+    "emergency_policy": { "type": "string", "enum": ["protect_only", "flatten_if_safe", "flatten_all"] },
+    "emergency_min_pnl_to_close_pct": { "type": "number" },
+    "emergency_stop_fallback_pct": { "type": "number" },
+    "kill_switch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "auth_failures": { "type": "integer" },
+        "nonce_errors": { "type": "integer" },
+        "time_drift_sec": { "type": "number" },
+        "max_retries": { "type": "integer" }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "metrics_port": { "type": "integer" },
+        "heartbeat_interval_sec": { "type": "integer" },
+        "heartbeat_missing_sec": { "type": "integer" },
+        "clock_drift_warn_ms": { "type": "number" },
+        "error_burst_threshold": { "type": "integer" },
+        "error_burst_window_sec": { "type": "integer" },
+        "no_trade_signals_min": { "type": "integer" },
+        "no_trade_window_sec": { "type": "integer" },
+        "alert_cooldown_sec": { "type": "integer" },
+        "account_label": { "type": "string" },
+        "order_retry": { "type": "integer" },
+        "order_retry_backoff_sec": { "type": "number" }
+      }
+    },
+    "position_cap": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "multiple": { "type": "number" },
+        "min": { "type": "number" },
+        "max": { "type": "number" }
+      }
+    },
+    "candle_long_max_pos_ratio": { "type": "number" },
+    "candle_short_min_pos_ratio": { "type": "number" },
+    "oversize_tolerance": { "type": "number" },
+    "pyramid_cooldown_bars": { "type": "integer" }
+  }
+}

@@ -12,12 +12,12 @@ from typing import Any, Callable, Dict, Optional
 import pandas as pd
 
 from config import *  # TF, RISK_PCT, LEVERAGE, UNIVERSE, SAFE_RESTART, ATR_LEN, POLL_SEC, DATA_BASE_DIR, TESTNET
-from exchange_api import ExchangeAPI, BalanceAuthError, BalanceSyncError
+from auto_trading_bot.exchange_api import ExchangeAPI, BalanceAuthError, BalanceSyncError
 from strategy import DonchianATREngine
 from indicators import atr, is_near_funding
-from reporter import Reporter
-from alerts import slack_notify_safely, slack_notify_exit, start_alert_scheduler
-from metrics import start_metrics_server, get_metrics_manager
+from auto_trading_bot.reporter import Reporter
+from auto_trading_bot.alerts import slack_notify_safely, slack_notify_exit, start_alert_scheduler
+from auto_trading_bot.metrics import start_metrics_server, get_metrics_manager
 from slack_notify import notify_emergency
 
 try:
@@ -193,6 +193,8 @@ class EmergencyManager:
         daily_dd_limit: float,
         emergency_policy: str,
         kill_switch: Dict[str, Any],
+        order_retry_attempts: int = 3,
+        order_retry_backoff_sec: float = 1.0,
     ) -> None:
         self.exchange = exchange
         self.engine = engine
@@ -202,6 +204,8 @@ class EmergencyManager:
         self.daily_dd_limit = float(daily_dd_limit or 0.0)
         self.emergency_policy = (emergency_policy or "protect_only").lower()
         self.kill_switch_cfg = kill_switch or {}
+        self.order_retry_attempts = max(0, int(order_retry_attempts))
+        self.order_retry_backoff_sec = max(0.0, float(order_retry_backoff_sec))
         self.error_counts = {"auth": 0, "nonce": 0, "time_drift": 0}
         self.block_entries_until: Optional[datetime] = None
         self.auto_testnet_armed = False
@@ -266,55 +270,178 @@ class EmergencyManager:
         if now is None:
             now = datetime.now(timezone.utc)
         reason_text = reason or "unspecified"
-        self.notify(f"[EMERGENCY] Policy '{self.emergency_policy}' executed due to {reason_text}.")
+        attempt_message = f"[EMERGENCY] Policy '{self.emergency_policy}' triggered by {reason_text}; initiating cleanup."
+        self.notify(attempt_message)
+        logger.warning("Emergency cleanup triggered: policy=%s reason=%s", self.emergency_policy, reason_text)
+
+        deadline = self._next_utc_midnight(now)
+
         if self.emergency_policy == "protect_only":
-            self.block_entries_until = self._next_utc_midnight(now)
+            self.block_entries_until = deadline
             _rearm_protective_stops(self.exchange, self.engine)
+            completion_message = (
+                f"[EMERGENCY] Policy 'protect_only' applied; entries blocked until "
+                f"{deadline.isoformat().replace('+00:00', 'Z')}."
+            )
+            self.notify(completion_message)
+            logger.info("Protect-only policy applied; entries blocked until %s", deadline)
             return
+
         require_profit = self.emergency_policy == "flatten_if_safe"
-        self._flatten_positions(require_profit=require_profit)
-        self.block_entries_until = self._next_utc_midnight(now)
+        summary = self._flatten_positions(require_profit=require_profit)
+        closed = summary.get("closed", [])
+        failed = summary.get("failed", [])
+        skipped = summary.get("skipped", [])
+
+        self.block_entries_until = deadline
         _rearm_protective_stops(self.exchange, self.engine)
 
-    def _flatten_positions(self, require_profit: bool) -> None:
+        if self.emergency_policy == "flatten_all":
+            if failed:
+                detail_parts: list[str] = []
+                for item in failed:
+                    symbol = item.get("symbol", "?")
+                    remaining = item.get("remaining_qty")
+                    try:
+                        remaining_val = float(remaining)
+                        if math.isnan(remaining_val):
+                            remaining_text = "nan"
+                        else:
+                            remaining_text = f"{remaining_val:.4f}"
+                    except Exception:
+                        remaining_text = str(remaining)
+                    reason_note = item.get("reason") or "unknown"
+                    detail_parts.append(f"{symbol} rem={remaining_text} ({reason_note})")
+                detail = "; ".join(detail_parts) if detail_parts else "unknown"
+                self.notify(f"[EMERGENCY] Flatten_all incomplete: {detail}. Manual intervention required.")
+                logger.error("Flatten_all failed to flatten all positions: %s", detail)
+            else:
+                count = len(closed)
+                self.notify(
+                    f"[EMERGENCY] Policy 'flatten_all' executed successfully; {count} positions confirmed flat."
+                )
+                logger.info("Flatten_all succeeded; %s positions closed.", count)
+        else:
+            closed_count = len(closed)
+            if closed_count:
+                message = (
+                    f"[EMERGENCY] Policy 'flatten_if_safe' closed {closed_count} profitable positions."
+                )
+            else:
+                message = "[EMERGENCY] Policy 'flatten_if_safe' found no profitable positions to close."
+            self.notify(message)
+            if failed:
+                logger.error("Flatten_if_safe encountered failures: %s", failed)
+
+        if skipped:
+            logger.info("Emergency flatten skipped %s symbols: %s", len(skipped), skipped)
+
+    def _flatten_positions(self, require_profit: bool) -> Dict[str, Any]:
+        outcomes: Dict[str, list[Dict[str, Any]]] = {"closed": [], "failed": [], "skipped": []}
+        targets: list[str] = []
+        meta: Dict[str, Dict[str, Any]] = {}
         for symbol in self.universe:
             try:
                 pos = self.exchange.position_for(symbol)
-            except Exception:
+            except Exception as exc:
+                outcomes["skipped"].append({"symbol": symbol, "reason": f"position_fetch:{exc}"})
                 continue
             if not pos:
                 continue
-            amt_raw = pos.get('positionAmt') or pos.get('contracts') or pos.get('amount')
-            try:
-                amt = float(amt_raw)
-            except Exception:
+            amt = self._position_amount(pos)
+            if abs(amt) <= 1e-8:
                 continue
-            if amt == 0:
-                continue
-            side = 'long' if amt > 0 else 'short'
+            side = "long" if amt > 0 else "short"
             if require_profit and not self._is_profitable(symbol, side, pos):
+                outcomes["skipped"].append({"symbol": symbol, "reason": "not_profitable"})
                 continue
+            targets.append(symbol)
+            meta[symbol] = {"side": side, "initial_qty": abs(amt)}
+
+        if not targets:
+            return outcomes
+
+        flatten_fn = getattr(self.exchange, "flatten_all", None)
+        if not callable(flatten_fn):
+            logger.error("ExchangeAPI has no flatten_all implementation; cannot execute emergency flatten.")
+            for symbol in targets:
+                meta_info = meta.get(symbol, {})
+                outcomes["failed"].append(
+                    {
+                        "symbol": symbol,
+                        "reason": "flatten_all_missing",
+                        "remaining_qty": meta_info.get("initial_qty"),
+                        "side": meta_info.get("side"),
+                        "initial_qty": meta_info.get("initial_qty"),
+                    }
+                )
+            return outcomes
+
+        results = flatten_fn(
+            targets,
+            retries=self.order_retry_attempts,
+            backoff_sec=self.order_retry_backoff_sec,
+        ) or []
+
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            symbol = result.get("symbol")
+            if not symbol:
+                continue
+            meta_info = meta.get(symbol, {})
+            result.setdefault("side", meta_info.get("side"))
+            result.setdefault("initial_qty", meta_info.get("initial_qty"))
+            if result.get("status") == "closed":
+                outcomes["closed"].append(result)
+                self._clear_engine_state(symbol)
+            else:
+                result.setdefault("remaining_qty", meta_info.get("initial_qty"))
+                outcomes["failed"].append(result)
+
+        reported = {entry.get("symbol") for entry in results if isinstance(entry, dict)}
+        for symbol in targets:
+            if symbol not in reported:
+                meta_info = meta.get(symbol, {})
+                outcomes["failed"].append(
+                    {
+                        "symbol": symbol,
+                        "reason": "no_response",
+                        "remaining_qty": meta_info.get("initial_qty"),
+                        "side": meta_info.get("side"),
+                        "initial_qty": meta_info.get("initial_qty"),
+                    }
+                )
+
+        return outcomes
+
+    def _clear_engine_state(self, symbol: str) -> None:
+        state_obj = getattr(self.engine, "state", None)
+        if isinstance(state_obj, dict):
+            entry = state_obj.get(symbol)
+            if isinstance(entry, dict):
+                entry["in_position"] = False
+            else:
+                state_obj[symbol] = {"in_position": False}
+        if hasattr(self.engine, "clear_position_state"):
             try:
-                self.exchange.cancel_all(symbol)
+                self.engine.clear_position_state(symbol)
             except Exception:
                 pass
-            try:
-                self.exchange.create_market_order_safe(symbol, 'sell' if side == 'long' else 'buy', abs(amt))
-            except Exception as exc:
-                print(f"[WARN] emergency flatten failed {symbol}: {exc}")
+
+    @staticmethod
+    def _position_amount(position: Dict[str, Any]) -> float:
+        if not position:
+            return 0.0
+        for key in ("positionAmt", "contracts", "amount", "size"):
+            value = position.get(key)
+            if value in (None, ""):
                 continue
-            state_obj = getattr(self.engine, 'state', None)
-            if isinstance(state_obj, dict):
-                entry = state_obj.get(symbol)
-                if isinstance(entry, dict):
-                    entry['in_position'] = False
-                else:
-                    state_obj[symbol] = {'in_position': False}
-            if hasattr(self.engine, 'clear_position_state'):
-                try:
-                    self.engine.clear_position_state(symbol)
-                except Exception:
-                    pass
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+        return 0.0
 
     def _is_profitable(self, symbol: str, side: str, pos: Dict[str, Any]) -> bool:
         try:

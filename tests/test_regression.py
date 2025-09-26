@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from baseline import DEFAULT_BASELINE_PATH, generate_baseline
-from reporter import generate_report
+from auto_trading_bot.reporter import generate_report
 
 # Mark all tests in this module as regression (slow)
 pytestmark = pytest.mark.regression
@@ -155,3 +155,4 @@ def test_report_metrics_regression(baseline_data: Dict[str, Any], current_genera
             assert (math.isinf(exp) and math.isinf(act)), f"Metric {key} mismatch (infinite check)"
         else:
             assert act == pytest.approx(exp, rel=1e-2, abs=1e-2), f"Metric {key} mismatch"
+

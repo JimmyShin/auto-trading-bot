@@ -2,7 +2,7 @@ import os
 import csv
 from datetime import datetime
 
-from reporter import Reporter
+from auto_trading_bot.reporter import Reporter
 
 
 def test_r_atr_long_and_short(tmp_path, monkeypatch):
@@ -71,4 +71,5 @@ def test_percent_basis_risk_and_fees(tmp_path):
     # R_usd_expost = pnl_quote_expost / risk_usdt_planned = 4.5/20 = 0.225
     val = float(row.get("R_usd_expost") or 0.0)
     assert abs(val - 0.225) < 1e-6
+
 

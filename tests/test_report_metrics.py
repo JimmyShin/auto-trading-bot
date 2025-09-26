@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from reporter import generate_report
+from auto_trading_bot.reporter import generate_report
 
 
 def make_trades_df():
@@ -33,4 +33,5 @@ def test_win_rate_expectancy_mdd():
     # Equity after trades: 1.1 -> 1.045 -> 1.254 -> 1.129
     # Max drawdown from peak 1.254 to 1.129 ~ 0.09968
     assert df.loc[0, "mdd"] == pytest.approx(0.1, rel=1e-2)
+
 

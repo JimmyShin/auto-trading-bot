@@ -2,8 +2,8 @@ import os
 import csv
 from datetime import datetime
 
-import alerts
-from reporter import Reporter
+from auto_trading_bot import alerts
+from auto_trading_bot.reporter import Reporter
 
 
 def test_slack_notify_exit_uses_trade_logs(tmp_path, monkeypatch):
@@ -81,3 +81,4 @@ def test_slack_notify_exit_uses_trade_logs(tmp_path, monkeypatch):
         rows = list(r)
         assert rows[-1].get("R_atr_expost") in ("2.0", "2", "2.000000", "2.000")
     os.environ.pop("SLACK_WEBHOOK_URL", None)
+

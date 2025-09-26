@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Callable
 
 try:
-    from alerts import slack_notify_safely
+    from auto_trading_bot.alerts import slack_notify_safely
 except Exception:  # pragma: no cover - fallback when alerts unavailable during tests
     def slack_notify_safely(message: str) -> bool:  # type: ignore
         raise RuntimeError("slack_notify_safely is unavailable") from None
@@ -26,4 +26,3 @@ def notify_emergency(message: str, *, prefix: str = DEFAULT_PREFIX, sender: Call
         return sender(_format_message(message, prefix=prefix))
     except Exception:
         return False
-

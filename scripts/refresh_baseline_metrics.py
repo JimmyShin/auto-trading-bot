@@ -7,7 +7,7 @@ import math
 import pandas as pd
 
 from baseline import DEFAULT_BASELINE_PATH, generate_baseline
-from reporter import generate_report
+from auto_trading_bot.reporter import generate_report
 
 
 def _extract_trades_from_records(symbol_records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -112,4 +112,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

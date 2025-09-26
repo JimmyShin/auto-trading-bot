@@ -3,7 +3,7 @@ import math
 import pytest
 
 from strategy import DonchianATREngine
-from main import startup_sync, _ensure_protective_stop_on_restart
+from auto_trading_bot.main import startup_sync, _ensure_protective_stop_on_restart
 import config as cfg
 
 
@@ -61,4 +61,5 @@ def test_startup_sync_sets_entry_and_stop(tmp_path, monkeypatch):
     expected_stop = 200.0 * (1.0 + cfg.EMERGENCY_STOP_FALLBACK_PCT)
     lt = float(st.get("last_trail_stop", 0.0))
     assert lt == pytest.approx(expected_stop, rel=1e-6)
+
 

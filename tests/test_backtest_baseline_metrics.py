@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from baseline import DEFAULT_BASELINE_PATH
-from reporter import generate_report
+from auto_trading_bot.reporter import generate_report
 from backtest.metrics import equity_curve, max_drawdown
 
 # Mark this module as regression (computes equity curve from baseline trades)
@@ -86,3 +86,4 @@ def test_backtest_equity_metrics_match_reporter(baseline_path: Path):
         assert sharpe_na == pytest.approx(float(rep["sharpe"]), rel=0.25, abs=0.25)
     else:
         assert float(rep["sharpe"]) == pytest.approx(0.0, abs=1e-9)
+
