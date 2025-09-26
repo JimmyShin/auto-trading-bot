@@ -9,6 +9,9 @@ jobs:
   # CI: run tests and gate later stages on success
   tests:
     runs-on: ubuntu-latest
+    env:
+      # Use bundled small OHLCV fixtures in CI
+      BASELINE_OHLCV_DIR: tests/data/ohlcv
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

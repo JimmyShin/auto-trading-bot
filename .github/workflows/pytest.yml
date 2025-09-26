@@ -9,6 +9,9 @@ on:
 jobs:
   tests:
     runs-on: ubuntu-latest
+    env:
+      # Point baseline generator to bundled CSV fixtures so CI does not depend on data/backtest
+      BASELINE_OHLCV_DIR: tests/data/ohlcv
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
