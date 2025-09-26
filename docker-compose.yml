@@ -20,4 +20,4 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
-    command: ["python", "main.py"]
+    command: ["python", "-m", "auto_trading_bot.main"]
