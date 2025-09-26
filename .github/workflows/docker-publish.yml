@@ -66,6 +66,21 @@ jobs:
     environment:
       name: production
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Ensure the remote compose file includes `container_name: auto-trading-bot`
+      # so the container has a stable name (no _1 suffixes). This uploads the repo's
+      # docker-compose.yml to the server before running the deploy script.
+      - name: Upload docker-compose.yml to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          source: "docker-compose.yml"
+          target: "/opt/auto-trading-bot/"
+
       - name: Deploy to droplet via SSH
         uses: appleboy/ssh-action@v0.1.10
         with:
