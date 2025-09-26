@@ -490,50 +490,50 @@ def main():
                             b.cancel_all(symbol)
                             order = b.create_market_order_safe(symbol, side_order, qty)
                             eff_qty = float(order.get('amount', qty) or qty)
-                                if side_order == 'buy':
-                                    b.create_stop_market_safe(symbol, 'sell', stop_price, eff_qty, reduce_only=True)
-                                    risk_usdt = abs(close - stop_price) * eff_qty
-                                    eng.update_symbol_state_on_entry(symbol, 'long', close, eff_qty, entry_stop_price=stop_price, risk_usdt=risk_usdt)
-                                    # Snapshot risk basis at entry
-                                    try:
-                                        from config import ATR_LEN as _ATR_LEN, ATR_STOP_K as _STOP_K
-                                    except Exception:
-                                        _ATR_LEN, _STOP_K = 14, 1.2
-                                    fallback_pct = 0.004
-                                    atr_stop = _STOP_K * float(atr_abs)
-                                    pct_stop = fallback_pct * float(close)
-                                    stop_basis = 'atr' if atr_stop >= pct_stop else 'percent'
-                                    stop_distance = max(atr_stop, pct_stop)
-                                    log_trade(
-                                        symbol,
-                                        'LONG',
-                                        close,
-                                        eff_qty,
-                                        'MA_CROSS',
-                                        risk_usdt=risk_usdt,
-                                        timeframe=TF,
-                                        leverage=LEVERAGE,
-                                        entry_atr_abs=float(atr_abs),
-                                        atr_period=int(_ATR_LEN),
-                                        atr_source='hlc3',
-                                        stop_basis=stop_basis,
-                                        stop_k=float(_STOP_K),
-                                        fallback_pct=float(fallback_pct),
-                                        stop_distance=float(stop_distance),
-                                        risk_usdt_planned=float(stop_distance) * float(eff_qty),
-                                    )
+                            if side_order == 'buy':
+                                b.create_stop_market_safe(symbol, 'sell', stop_price, eff_qty, reduce_only=True)
+                                risk_usdt = abs(close - stop_price) * eff_qty
+                                eng.update_symbol_state_on_entry(symbol, 'long', close, eff_qty, entry_stop_price=stop_price, risk_usdt=risk_usdt)
+                                # Snapshot risk basis at entry
+                                try:
+                                    from config import ATR_LEN as _ATR_LEN, ATR_STOP_K as _STOP_K
+                                except Exception:
+                                    _ATR_LEN, _STOP_K = 14, 1.2
+                                fallback_pct = 0.004
+                                atr_stop = _STOP_K * float(atr_abs)
+                                pct_stop = fallback_pct * float(close)
+                                stop_basis = 'atr' if atr_stop >= pct_stop else 'percent'
+                                stop_distance = max(atr_stop, pct_stop)
+                                log_trade(
+                                    symbol,
+                                    'LONG',
+                                    close,
+                                    eff_qty,
+                                    'MA_CROSS',
+                                    risk_usdt=risk_usdt,
+                                    timeframe=TF,
+                                    leverage=LEVERAGE,
+                                    entry_atr_abs=float(atr_abs),
+                                    atr_period=int(_ATR_LEN),
+                                    atr_source='hlc3',
+                                    stop_basis=stop_basis,
+                                    stop_k=float(_STOP_K),
+                                    fallback_pct=float(fallback_pct),
+                                    stop_distance=float(stop_distance),
+                                    risk_usdt_planned=float(stop_distance) * float(eff_qty),
+                                )
                                 try:
                                     log_detailed_entry(symbol, 'LONG', close, eff_qty, stop_price, plan.get('risk_multiplier', 1.0), atr_abs, plan.get('signal', {}), eq, 'MA_ALIGNMENT', plan.get('reasons'))
                                 except Exception:
                                     pass
-                                else:
-                                    b.create_stop_market_safe(symbol, 'buy', stop_price, eff_qty, reduce_only=True)
-                                    risk_usdt = abs(stop_price - close) * eff_qty
-                                    eng.update_symbol_state_on_entry(symbol, 'short', close, eff_qty, entry_stop_price=stop_price, risk_usdt=risk_usdt)
-                                    try:
-                                        from config import ATR_LEN as _ATR_LEN, ATR_STOP_K as _STOP_K
-                                    except Exception:
-                                        _ATR_LEN, _STOP_K = 14, 1.2
+                            else:
+                                b.create_stop_market_safe(symbol, 'buy', stop_price, eff_qty, reduce_only=True)
+                                risk_usdt = abs(stop_price - close) * eff_qty
+                                eng.update_symbol_state_on_entry(symbol, 'short', close, eff_qty, entry_stop_price=stop_price, risk_usdt=risk_usdt)
+                                try:
+                                    from config import ATR_LEN as _ATR_LEN, ATR_STOP_K as _STOP_K
+                                except Exception:
+                                    _ATR_LEN, _STOP_K = 14, 1.2
                                     fallback_pct = 0.004
                                     atr_stop = _STOP_K * float(atr_abs)
                                     pct_stop = fallback_pct * float(close)
