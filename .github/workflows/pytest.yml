@@ -15,6 +15,7 @@ jobs:
       BASELINE_OHLCV_DIR: tests/data/ohlcv
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
@@ -28,13 +29,14 @@ jobs:
             ${{ runner.os }}-pip-
 
       - name: Install dependencies
+        working-directory: ${{ github.workspace }}
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -e .
 
       - name: Run fast tests (exclude regression) with durations and timeouts
-        working-directory: .
+        working-directory: ${{ github.workspace }}
         run: |
           pytest -m "not regression" -vv -ra \
             --durations=15 --maxfail=1 \
