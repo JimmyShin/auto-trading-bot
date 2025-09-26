@@ -3,9 +3,11 @@ import time
 import signal
 import atexit
 import logging
+import math
 from logging.handlers import RotatingFileHandler
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from threading import Lock
+from typing import Any, Callable, Dict, Optional
 
 import pandas as pd
 
@@ -15,6 +17,7 @@ from strategy import DonchianATREngine
 from indicators import atr, is_near_funding
 from reporter import Reporter
 from alerts import slack_notify_safely, slack_notify_exit
+from slack_notify import notify_emergency
 
 try:
     from scripts.daily_report import generate_report as _gen_daily_report
@@ -156,49 +159,210 @@ def startup_sync(b: ExchangeAPI, eng: DonchianATREngine) -> None:
     except Exception:
         pass
 
-def policy_emergency_cleanup():
-    """Policy-based emergency handling (safe minimal).
-
-    Re-arm protective stops for any open positions to avoid forced closes
-    when the app receives a termination signal.
-    """
-    global b_global, eng_global
-    if not b_global or not eng_global:
+def _rearm_protective_stops(exchange: Optional[ExchangeAPI], eng: Optional[DonchianATREngine]) -> None:
+    if not exchange or not eng:
         return
     fatal_auth = False
-    fatal_msg = None
     try:
         for symbol in UNIVERSE:
             if fatal_auth:
                 break
             try:
-                _ensure_protective_stop_on_restart(b_global, eng_global, symbol)
+                _ensure_protective_stop_on_restart(exchange, eng, symbol)
             except BalanceAuthError as auth_err:
                 fatal_auth = True
-                fatal_msg = auth_err
                 print(f"[FATAL] {symbol} emergency protect failed: {auth_err}")
-            except Exception as e:
-                print(f"[WARN] {symbol} emergency protect failed: {e}")
-        if fatal_auth:
-            print('[FATAL] Emergency cleanup aborted because Binance rejected API credentials.')
-        else:
+            except Exception as exc:
+                print(f"[WARN] {symbol} emergency protect failed: {exc}")
+        if not fatal_auth:
             print('[OK] Emergency handling completed')
-    except Exception as e:
-        print(f"[ERR] Emergency handling error: {e}")
+    except Exception as exc:
+        print(f"[ERR] Emergency handling error: {exc}")
 
 
-# Legacy name for other call sites
-emergency_cleanup = policy_emergency_cleanup
+class EmergencyManager:
+    def __init__(
+        self,
+        exchange: ExchangeAPI,
+        engine: DonchianATREngine,
+        universe: list[str],
+        notify_callback: Callable[[str], bool],
+        *,
+        auto_testnet_on_dd: bool,
+        daily_dd_limit: float,
+        emergency_policy: str,
+        kill_switch: Dict[str, Any],
+    ) -> None:
+        self.exchange = exchange
+        self.engine = engine
+        self.universe = list(universe)
+        self.notify = notify_callback
+        self.auto_testnet_on_dd = bool(auto_testnet_on_dd)
+        self.daily_dd_limit = float(daily_dd_limit or 0.0)
+        self.emergency_policy = (emergency_policy or "protect_only").lower()
+        self.kill_switch_cfg = kill_switch or {}
+        self.error_counts = {"auth": 0, "nonce": 0, "time_drift": 0}
+        self.block_entries_until: Optional[datetime] = None
+        self.auto_testnet_armed = False
+        self.kill_switch_triggered = False
+
+    def _next_utc_midnight(self, now: datetime) -> datetime:
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        tomorrow = (now + timedelta(days=1)).date()
+        return datetime(tomorrow.year, tomorrow.month, tomorrow.day, tzinfo=timezone.utc)
+
+    def positions_flat(self) -> bool:
+        state = getattr(self.engine, "state", {})
+        if isinstance(state, dict):
+            for value in state.values():
+                if isinstance(value, dict) and value.get("in_position"):
+                    return False
+        return True
+
+    def should_block_entries(self, now: datetime) -> bool:
+        if self.block_entries_until and now >= self.block_entries_until:
+            self.block_entries_until = None
+            self.auto_testnet_armed = False
+        return self.block_entries_until is not None
+
+    def handle_daily_drawdown(self, dd_ratio: float, now: datetime) -> bool:
+        self.should_block_entries(now)
+        if not self.auto_testnet_on_dd or self.auto_testnet_armed:
+            return False
+        if dd_ratio >= self.daily_dd_limit and self.positions_flat():
+            self.auto_testnet_armed = True
+            self.block_entries_until = self._next_utc_midnight(now)
+            self.exchange.set_testnet(True)
+            self.notify("[EMERGENCY] AUTO_TESTNET_ON_DD triggered → switched to testnet, live entries disabled until UTC reset.")
+            return True
+        return False
+
+    def record_error(self, kind: str) -> None:
+        if self.kill_switch_triggered:
+            return
+        key_map = {"auth": "auth", "nonce": "nonce", "time_drift": "time_drift"}
+        mapped = key_map.get(kind)
+        if mapped:
+            self.error_counts[mapped] += 1
+
+    def should_trigger_kill_switch(self) -> bool:
+        if self.kill_switch_triggered:
+            return True
+        cfg = self.kill_switch_cfg or {}
+        auth_limit = int(cfg.get("auth_failures", 5))
+        nonce_limit = int(cfg.get("nonce_errors", cfg.get("max_retries", 3)))
+        drift_limit = int(cfg.get("max_retries", 3))
+        if self.error_counts["auth"] >= auth_limit:
+            self.kill_switch_triggered = True
+        if self.error_counts["nonce"] >= nonce_limit:
+            self.kill_switch_triggered = True
+        if self.error_counts["time_drift"] >= drift_limit:
+            self.kill_switch_triggered = True
+        return self.kill_switch_triggered
+
+    def execute_cleanup(self, reason: str, now: Optional[datetime] = None) -> None:
+        if now is None:
+            now = datetime.now(timezone.utc)
+        reason_text = reason or "unspecified"
+        self.notify(f"[EMERGENCY] Policy '{self.emergency_policy}' executed due to {reason_text}.")
+        if self.emergency_policy == "protect_only":
+            self.block_entries_until = self._next_utc_midnight(now)
+            _rearm_protective_stops(self.exchange, self.engine)
+            return
+        require_profit = self.emergency_policy == "flatten_if_safe"
+        self._flatten_positions(require_profit=require_profit)
+        self.block_entries_until = self._next_utc_midnight(now)
+        _rearm_protective_stops(self.exchange, self.engine)
+
+    def _flatten_positions(self, require_profit: bool) -> None:
+        for symbol in self.universe:
+            try:
+                pos = self.exchange.position_for(symbol)
+            except Exception:
+                continue
+            if not pos:
+                continue
+            amt_raw = pos.get('positionAmt') or pos.get('contracts') or pos.get('amount')
+            try:
+                amt = float(amt_raw)
+            except Exception:
+                continue
+            if amt == 0:
+                continue
+            side = 'long' if amt > 0 else 'short'
+            if require_profit and not self._is_profitable(symbol, side, pos):
+                continue
+            try:
+                self.exchange.cancel_all(symbol)
+            except Exception:
+                pass
+            try:
+                self.exchange.create_market_order_safe(symbol, 'sell' if side == 'long' else 'buy', abs(amt))
+            except Exception as exc:
+                print(f"[WARN] emergency flatten failed {symbol}: {exc}")
+                continue
+            state_obj = getattr(self.engine, 'state', None)
+            if isinstance(state_obj, dict):
+                entry = state_obj.get(symbol)
+                if isinstance(entry, dict):
+                    entry['in_position'] = False
+                else:
+                    state_obj[symbol] = {'in_position': False}
+            if hasattr(self.engine, 'clear_position_state'):
+                try:
+                    self.engine.clear_position_state(symbol)
+                except Exception:
+                    pass
+
+    def _is_profitable(self, symbol: str, side: str, pos: Dict[str, Any]) -> bool:
+        try:
+            profit = float(pos.get('unrealizedProfit'))
+            if not math.isnan(profit):
+                return profit > 0
+        except Exception:
+            pass
+        try:
+            entry_price = float(pos.get('entryPrice') or 0.0)
+        except Exception:
+            entry_price = 0.0
+        if entry_price <= 0:
+            return False
+        mark = 0.0
+        try:
+            ticker = self.exchange.fetch_ticker(symbol)
+            mark = float(ticker.get('last') or ticker.get('close') or ticker.get('markPrice') or 0.0)
+        except Exception:
+            pass
+        if mark <= 0:
+            return False
+        if side == 'long':
+            return mark > entry_price
+        return mark < entry_price
+
+
+emergency_manager: Optional[EmergencyManager] = None
+
+
+def emergency_cleanup(reason: str = "manual") -> None:
+    manager = emergency_manager
+    if manager:
+        try:
+            manager.execute_cleanup(reason, datetime.now(timezone.utc))
+        except Exception as exc:
+            print(f"[WARN] emergency cleanup failed: {exc}")
+    else:
+        _rearm_protective_stops(b_global, eng_global)
 
 
 def signal_handler(signum, frame):
-    emergency_cleanup()
+    emergency_cleanup("signal")
     os._exit(0)
 
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
-atexit.register(emergency_cleanup)
+atexit.register(lambda: emergency_cleanup("atexit"))
 
 
 def fetch_df(b: ExchangeAPI, symbol: str, tf: str, lookback: int) -> pd.DataFrame:
@@ -218,6 +382,24 @@ def main():
     eng = DonchianATREngine()
     global b_global, eng_global
     b_global, eng_global = b, eng
+    manager = EmergencyManager(
+        exchange=b,
+        engine=eng,
+        universe=UNIVERSE,
+        notify_callback=notify_emergency,
+        auto_testnet_on_dd=AUTO_TESTNET_ON_DD,
+        daily_dd_limit=DAILY_DD_LIMIT,
+        emergency_policy=EMERGENCY_POLICY,
+        kill_switch=KILL_SWITCH,
+    )
+    global emergency_manager
+    emergency_manager = manager
+
+    def _check_kill_switch() -> None:
+        if manager.should_trigger_kill_switch():
+            notify_emergency("[CRITICAL] Kill-switch activated due to repeated failures → bot terminated.")
+            emergency_cleanup("kill-switch")
+            raise SystemExit(1)
 
     # Log active config snapshot for traceability (secrets redacted)
     try:
@@ -248,20 +430,24 @@ def main():
     except BalanceAuthError as auth_err:
         logger.error('Startup balance auth error: %s', auth_err)
         print('[FATAL] Binance authentication failed on startup; check API key/IP permissions.')
+        manager.record_error('auth')
         try:
             slack_notify_safely(f":rotating_light: Startup auth failure: {auth_err}")
         except Exception:
             pass
-        emergency_cleanup()
+        _check_kill_switch()
+        emergency_cleanup("startup-auth")
         return
     except BalanceSyncError as sync_err:
         logger.error('Startup balance sync error: %s', sync_err)
         print('[FATAL] Unable to sync with Binance server time on startup.')
+        manager.record_error('time_drift')
         try:
             slack_notify_safely(f":rotating_light: Startup time sync failure: {sync_err}")
         except Exception:
             pass
-        emergency_cleanup()
+        _check_kill_switch()
+        emergency_cleanup("startup-sync")
         return
     except Exception as bal_err:
         logger.warning('Startup balance fetch failed; continuing with 0 equity: %s', bal_err)
@@ -288,6 +474,8 @@ def main():
     while True:
         lock.acquire()
         try:
+            now_utc = datetime.now(timezone.utc)
+            entries_blocked = manager.should_block_entries(now_utc)
             eq = last_equity
             try:
                 fresh_eq = float(b.get_equity_usdt())
@@ -297,20 +485,24 @@ def main():
             except BalanceAuthError as auth_err:
                 logger.error('Balance auth error: %s', auth_err)
                 print('[FATAL] Binance authentication failed; stopping bot for safety.')
+                manager.record_error('auth')
                 try:
                     slack_notify_safely(f":rotating_light: Runtime auth failure: {auth_err}")
                 except Exception:
                     pass
-                emergency_cleanup()
+                _check_kill_switch()
+                emergency_cleanup("runtime-auth")
                 raise SystemExit(1)
             except BalanceSyncError as sync_err:
                 logger.error('Balance sync failure: %s', sync_err)
                 print('[FATAL] Unable to stay behind Binance server time; stopping bot.')
+                manager.record_error('time_drift')
                 try:
                     slack_notify_safely(f":rotating_light: Runtime time sync failure: {sync_err}")
                 except Exception:
                     pass
-                emergency_cleanup()
+                _check_kill_switch()
+                emergency_cleanup("runtime-sync")
                 raise SystemExit(2)
             except Exception as bal_err:
                 logger.warning('Balance fetch error, using cached equity: %s', bal_err)
@@ -384,7 +576,12 @@ def main():
                     try:
                         sig = plan.get('signal', {})
                         anchor = float(((eng.state or {}).get('daily') or {}).get('anchor', eq) if hasattr(eng,'state') else eq)
-                        dd_pct = ((anchor - eq) / max(anchor, 1e-9)) * 100.0
+                        dd_ratio = max(0.0, (anchor - eq) / max(anchor, 1e-9)) if anchor else 0.0
+                        if manager.handle_daily_drawdown(dd_ratio, now_utc):
+                            entries_blocked = manager.should_block_entries(now_utc)
+                        dd_pct = dd_ratio * 100.0
+                        if manager:
+                            entries_blocked = manager.should_block_entries(now_utc)
                         log_signal_analysis(symbol, close, sig, is_new_bar, funding_avoid, daily_loss_hit, eq, dd_pct, plan.get('decision'), plan.get('skip_reason'))
                     except Exception as _e:
                         print(f"[WARN] signal log error {symbol}: {_e}")
@@ -478,7 +675,7 @@ def main():
                             pass
 
                     decision = plan.get('decision')
-                    if decision in ('ENTER_LONG','ENTER_SHORT'):
+                    if not entries_blocked and decision in ('ENTER_LONG','ENTER_SHORT'):
                         if has_pos:
                             continue
                         side_order = 'buy' if decision == 'ENTER_LONG' else 'sell'
@@ -654,6 +851,15 @@ def main():
             emergency_cleanup()
             os._exit(0)
         except Exception as e:
+            try:
+                msg = str(e).lower()
+                if 'nonce' in msg:
+                    manager.record_error('nonce')
+                elif 'timestamp' in msg or 'time drift' in msg:
+                    manager.record_error('time_drift')
+                _check_kill_switch()
+            except Exception:
+                pass
             logger.exception("Unexpected error: %s", e)
             print("3s retry...")
             time.sleep(3)

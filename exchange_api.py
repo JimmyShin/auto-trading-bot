@@ -72,6 +72,13 @@ class ExchangeAPI:
     def fetch_my_trades(self, symbol: str, limit: int = 5):
         return self.client.exchange.fetch_my_trades(symbol, limit=limit)
 
+    def set_testnet(self, enabled: bool) -> bool:
+        """Toggle Binance futures testnet mode via underlying client."""
+        try:
+            return bool(self.client.set_testnet(bool(enabled)))
+        except Exception:
+            return False
+
     # ------------------------------------------------------------------
     # Direct access helpers
     # ------------------------------------------------------------------

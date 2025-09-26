@@ -24,7 +24,15 @@
     "min": 10000,
     "max": 25000
   },
-  "emergency_policy": "protect_only",
+  "auto_testnet_on_dd": true,
+  "daily_dd_limit": 0.05,
+  "emergency_policy": "flatten_all",
   "emergency_min_pnl_to_close_pct": 0.0,
-  "emergency_stop_fallback_pct": 0.015
+  "emergency_stop_fallback_pct": 0.015,
+  "kill_switch": {
+    "auth_failures": 5,
+    "nonce_errors": 3,
+    "time_drift_sec": 5,
+    "max_retries": 3
+  }
 }

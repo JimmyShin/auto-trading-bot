@@ -61,6 +61,7 @@ ATR_TRAIL_K = 2.5
 
 # Risk controls
 DAILY_LOSS_LIMIT = 0.06  # 6% daily loss
+DAILY_DD_LIMIT = float(os.getenv("DAILY_DD_LIMIT", "0.05"))
 FUNDING_AVOID_MIN = 5    # avoid entries/adds 5 minutes pre-funding
 
 # Runtime
@@ -81,13 +82,19 @@ OVERSIZE_TOLERANCE = 1.30
 DATA_BASE_DIR = os.getenv("DATA_DIR", "data")
 
 # Auto-switch to testnet after daily loss limit is hit (when flat)
-AUTO_TESTNET_ON_DD = True
+AUTO_TESTNET_ON_DD = _coerce_bool(os.getenv("AUTO_TESTNET_ON_DD", "true"))
 
 # Emergency handling
-EMERGENCY_POLICY = os.getenv("EMERGENCY_POLICY", "protect_only").lower()
+EMERGENCY_POLICY = os.getenv("EMERGENCY_POLICY", "flatten_all").lower()
 # Options: 'protect_only' | 'flatten_if_safe' | 'flatten_all'
 EMERGENCY_MIN_PNL_TO_CLOSE_PCT = float(os.getenv("EMERGENCY_MIN_PNL_TO_CLOSE_PCT", "0"))
 EMERGENCY_STOP_FALLBACK_PCT = float(os.getenv("EMERGENCY_STOP_FALLBACK_PCT", "0.015"))  # 1.5%
+KILL_SWITCH = {
+    "auth_failures": int(os.getenv("KILL_SWITCH_AUTH_FAILURES", "5")),
+    "nonce_errors": int(os.getenv("KILL_SWITCH_NONCE_ERRORS", "3")),
+    "time_drift_sec": float(os.getenv("KILL_SWITCH_TIME_DRIFT_SEC", "5")),
+    "max_retries": int(os.getenv("KILL_SWITCH_MAX_RETRIES", "3")),
+}
 CONFIG_JSON_PATH = Path(os.getenv("BOT_CONFIG_JSON", "config.json"))
 
 # --- JSON Schema validation helpers ---
@@ -120,6 +127,7 @@ def _load_schema() -> Dict[str, Any]:
             "atr_trail_k": {"type": "number"},
             "daily_loss_limit": {"type": "number"},
             "funding_avoid_min": {"type": "integer"},
+            "daily_dd_limit": {"type": "number"},
             "poll_sec": {"type": "integer"},
             "timeframe": {"type": "string"},
             "lookback": {"type": "integer"},
@@ -129,6 +137,16 @@ def _load_schema() -> Dict[str, Any]:
             "emergency_policy": {"type": "string", "enum": ["protect_only", "flatten_if_safe", "flatten_all"]},
             "emergency_min_pnl_to_close_pct": {"type": "number"},
             "emergency_stop_fallback_pct": {"type": "number"},
+            "kill_switch": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "auth_failures": {"type": "integer"},
+                    "nonce_errors": {"type": "integer"},
+                    "time_drift_sec": {"type": "number"},
+                    "max_retries": {"type": "integer"}
+                }
+            },
             "position_cap": {
                 "type": "object",
                 "additionalProperties": False,
@@ -202,6 +220,8 @@ if CONFIG_JSON_PATH.exists():
         ATR_TRAIL_K = float(_json_config['atr_trail_k'])
     if 'daily_loss_limit' in _json_config:
         DAILY_LOSS_LIMIT = float(_json_config['daily_loss_limit'])
+    if 'daily_dd_limit' in _json_config:
+        DAILY_DD_LIMIT = float(_json_config['daily_dd_limit'])
     if 'funding_avoid_min' in _json_config:
         FUNDING_AVOID_MIN = int(_json_config['funding_avoid_min'])
     if 'poll_sec' in _json_config:
@@ -228,6 +248,16 @@ if CONFIG_JSON_PATH.exists():
         EMERGENCY_MIN_PNL_TO_CLOSE_PCT = float(_json_config['emergency_min_pnl_to_close_pct'])
     if 'emergency_stop_fallback_pct' in _json_config:
         EMERGENCY_STOP_FALLBACK_PCT = float(_json_config['emergency_stop_fallback_pct'])
+    if 'kill_switch' in _json_config:
+        ks = _json_config['kill_switch'] or {}
+        if 'auth_failures' in ks:
+            KILL_SWITCH['auth_failures'] = int(ks['auth_failures'])
+        if 'nonce_errors' in ks:
+            KILL_SWITCH['nonce_errors'] = int(ks['nonce_errors'])
+        if 'time_drift_sec' in ks:
+            KILL_SWITCH['time_drift_sec'] = float(ks['time_drift_sec'])
+        if 'max_retries' in ks:
+            KILL_SWITCH['max_retries'] = int(ks['max_retries'])
     if 'position_cap' in _json_config:
         pc = _json_config['position_cap'] or {}
         if 'multiple' in pc:
@@ -252,6 +282,7 @@ def active_config_snapshot() -> Dict[str, Any]:
         "ATR_STOP_K": ATR_STOP_K,
         "ATR_TRAIL_K": ATR_TRAIL_K,
         "DAILY_LOSS_LIMIT": DAILY_LOSS_LIMIT,
+        "DAILY_DD_LIMIT": DAILY_DD_LIMIT,
         "FUNDING_AVOID_MIN": FUNDING_AVOID_MIN,
         "POLL_SEC": POLL_SEC,
         "TF": TF,
@@ -267,6 +298,7 @@ def active_config_snapshot() -> Dict[str, Any]:
         "EMERGENCY_POLICY": EMERGENCY_POLICY,
         "EMERGENCY_MIN_PNL_TO_CLOSE_PCT": EMERGENCY_MIN_PNL_TO_CLOSE_PCT,
         "EMERGENCY_STOP_FALLBACK_PCT": EMERGENCY_STOP_FALLBACK_PCT,
+        "KILL_SWITCH": KILL_SWITCH,
         "CANDLE_LONG_MAX_POS_RATIO": CANDLE_LONG_MAX_POS_RATIO,
         "CANDLE_SHORT_MIN_POS_RATIO": CANDLE_SHORT_MIN_POS_RATIO,
         "OVERSIZE_TOLERANCE": OVERSIZE_TOLERANCE,

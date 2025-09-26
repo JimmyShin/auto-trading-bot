@@ -21,6 +21,7 @@
     "atr_trail_k": { "type": "number" },
     "daily_loss_limit": { "type": "number" },
     "funding_avoid_min": { "type": "integer" },
+    "daily_dd_limit": { "type": "number" },
     "poll_sec": { "type": "integer" },
     "timeframe": { "type": "string" },
     "lookback": { "type": "integer" },
@@ -30,6 +31,16 @@
     "emergency_policy": { "type": "string", "enum": ["protect_only", "flatten_if_safe", "flatten_all"] },
     "emergency_min_pnl_to_close_pct": { "type": "number" },
     "emergency_stop_fallback_pct": { "type": "number" },
+    "kill_switch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "auth_failures": { "type": "integer" },
+        "nonce_errors": { "type": "integer" },
+        "time_drift_sec": { "type": "number" },
+        "max_retries": { "type": "integer" }
+      }
+    },
     "position_cap": {
       "type": "object",
       "additionalProperties": false,
@@ -45,4 +56,3 @@
     "pyramid_cooldown_bars": { "type": "integer" }
   }
 }
-
