@@ -218,6 +218,55 @@ docker run --rm -e BINANCE_KEY=... -e BINANCE_SECRET=... -e TESTNET=true \
 
 GHCR publishing (on `main`) and optional remote deploy are configured in `.github/workflows/docker-publish.yml`.
 
+#### Docker Compose (production)
+
+- File: `docker-compose.yml`
+- Behavior:
+  - Mounts `./data` and `./state.json`
+  - `restart: unless-stopped`
+  - Healthcheck uses `scripts/healthcheck.py` (checks recent heartbeat in `bot.log`)
+- Usage:
+  ```bash
+  # Set required env vars in .env (BINANCE_KEY, BINANCE_SECRET, TESTNET, etc.)
+  docker compose up -d --build
+  docker compose ps
+  docker compose logs -f bot
+  ```
+
+#### Docker Compose (development/backtesting)
+
+- File: `docker-compose.override.yml` (auto-applied by Compose)
+- Adds:
+  - Mount for `./data/backtest/ohlcv/`
+  - A `backtest` service (same image) to run ad‑hoc backtests inside the container
+- Usage:
+  ```bash
+  # Start bot + backtest shell container
+  docker compose up -d --build
+  # Exec into backtest container
+  docker compose exec backtest bash
+  # Inside container
+  python -m backtest.sim --parquet data/backtest/ohlcv/1h/BTC_USDT.csv
+  ```
+
+### Slack Alerts
+
+- The bot supports Slack Incoming Webhooks for alerts (fatal errors and daily summaries).
+- Set `SLACK_WEBHOOK_URL` in the environment (or `.env`).
+- Messages are posted as `{"text": "..."}` to the webhook; failures are logged and never crash the bot.
+
+Setup steps:
+- Create an Incoming Webhook in Slack (App Directory → Incoming Webhooks), select a channel or your personal DM.
+- Copy the Webhook URL and set it as `SLACK_WEBHOOK_URL`.
+- Example `.env` snippet:
+  ```env
+  SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T000/B000/XXXX
+  ```
+
+What triggers alerts:
+- Startup and runtime fatal errors (auth/sync failures)
+- Daily trading summary after trade closures (trades, wins/losses, win rate, PF, gross ±%)
+
 ### Tools (MCP)
 
 - Extra utilities under `tools/` for MCP integration:

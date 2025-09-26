@@ -1,0 +1,20 @@
+services:
+  bot:
+    build: .
+    image: auto-trading-bot:latest
+    container_name: auto-trading-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./data:/app/data
+      - ./state.json:/app/state.json
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    command: ["python", "main.py"]

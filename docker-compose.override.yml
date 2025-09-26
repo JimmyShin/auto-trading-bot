@@ -1,0 +1,21 @@
+services:
+  bot:
+    # Development overrides: bind backtest data and keep logs visible
+    volumes:
+      - ./data:/app/data
+      - ./state.json:/app/state.json
+      - ./data/backtest/ohlcv:/app/data/backtest/ohlcv
+
+  backtest:
+    build: .
+    image: auto-trading-bot:latest
+    container_name: auto-trading-bot-backtest
+    working_dir: /app
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./data:/app/data
+      - ./data/backtest/ohlcv:/app/data/backtest/ohlcv
+    command: ["sleep", "infinity"]

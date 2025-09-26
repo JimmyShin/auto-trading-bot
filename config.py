@@ -1,6 +1,7 @@
 ﻿import os
 import json
 from pathlib import Path
+from typing import Any, Dict
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -89,9 +90,80 @@ EMERGENCY_MIN_PNL_TO_CLOSE_PCT = float(os.getenv("EMERGENCY_MIN_PNL_TO_CLOSE_PCT
 EMERGENCY_STOP_FALLBACK_PCT = float(os.getenv("EMERGENCY_STOP_FALLBACK_PCT", "0.015"))  # 1.5%
 CONFIG_JSON_PATH = Path(os.getenv("BOT_CONFIG_JSON", "config.json"))
 
+# --- JSON Schema validation helpers ---
+def _load_schema() -> Dict[str, Any]:
+    schema_path = Path(__file__).resolve().parent / "config.schema.json"
+    if schema_path.exists():
+        try:
+            return json.loads(schema_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "binance_key": {"type": "string"},
+            "binance_secret": {"type": "string"},
+            "testnet": {"type": "boolean"},
+            "safe_restart": {"type": "boolean"},
+            "quote": {"type": "string"},
+            "universe": {"type": "array", "items": {"type": "string"}},
+            "risk_pct": {"type": "number"},
+            "leverage": {"type": ["number", "integer"]},
+            "enable_pyramiding": {"type": "boolean"},
+            "pyramid_levels": {
+                "type": "array",
+                "items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}},
+            },
+            "atr_len": {"type": "integer"},
+            "atr_stop_k": {"type": "number"},
+            "atr_trail_k": {"type": "number"},
+            "daily_loss_limit": {"type": "number"},
+            "funding_avoid_min": {"type": "integer"},
+            "poll_sec": {"type": "integer"},
+            "timeframe": {"type": "string"},
+            "lookback": {"type": "integer"},
+            "state_file": {"type": "string"},
+            "data_dir": {"type": "string"},
+            "auto_testnet_on_dd": {"type": "boolean"},
+            "emergency_policy": {"type": "string", "enum": ["protect_only", "flatten_if_safe", "flatten_all"]},
+            "emergency_min_pnl_to_close_pct": {"type": "number"},
+            "emergency_stop_fallback_pct": {"type": "number"},
+            "position_cap": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "multiple": {"type": "number"},
+                    "min": {"type": "number"},
+                    "max": {"type": "number"},
+                },
+            },
+            "candle_long_max_pos_ratio": {"type": "number"},
+            "candle_short_min_pos_ratio": {"type": "number"},
+            "oversize_tolerance": {"type": "number"},
+            "pyramid_cooldown_bars": {"type": "integer"},
+        },
+    }
+
+
+def validate_config_dict(obj: Dict[str, Any]) -> None:
+    if not isinstance(obj, dict):
+        raise RuntimeError("config.json must contain a JSON object")
+    try:
+        import jsonschema  # type: ignore
+    except Exception:
+        return  # jsonschema not installed; skip validation
+    schema = _load_schema()
+    try:
+        jsonschema.validate(instance=obj, schema=schema)  # type: ignore[attr-defined]
+    except Exception as exc:
+        raise RuntimeError(f"config.json validation failed: {exc}") from exc
+
 if CONFIG_JSON_PATH.exists():
     try:
         _json_config = json.loads(CONFIG_JSON_PATH.read_text(encoding="utf-8"))
+        # Validate against JSON Schema before applying
+        validate_config_dict(_json_config)
     except Exception as exc:
         raise RuntimeError(f"Failed to parse {CONFIG_JSON_PATH}: {exc}") from exc
 
@@ -166,4 +238,37 @@ if CONFIG_JSON_PATH.exists():
             POSITION_CAP_MAX = float(pc['max'])
 
     del _json_config
+
+# Snapshot for logging (no secrets)
+def active_config_snapshot() -> Dict[str, Any]:
+    return {
+        "TESTNET": TESTNET,
+        "SAFE_RESTART": SAFE_RESTART,
+        "QUOTE": QUOTE,
+        "UNIVERSE": list(UNIVERSE),
+        "RISK_PCT": RISK_PCT,
+        "LEVERAGE": LEVERAGE,
+        "ATR_LEN": ATR_LEN,
+        "ATR_STOP_K": ATR_STOP_K,
+        "ATR_TRAIL_K": ATR_TRAIL_K,
+        "DAILY_LOSS_LIMIT": DAILY_LOSS_LIMIT,
+        "FUNDING_AVOID_MIN": FUNDING_AVOID_MIN,
+        "POLL_SEC": POLL_SEC,
+        "TF": TF,
+        "LOOKBACK": LOOKBACK,
+        "STATE_FILE": STATE_FILE,
+        "DATA_BASE_DIR": DATA_BASE_DIR,
+        "POSITION_CAP_MULTIPLE": POSITION_CAP_MULTIPLE,
+        "POSITION_CAP_MIN": POSITION_CAP_MIN,
+        "POSITION_CAP_MAX": POSITION_CAP_MAX,
+        "ENABLE_PYRAMIDING": ENABLE_PYRAMIDING,
+        "PYRAMID_LEVELS": PYRAMID_LEVELS,
+        "AUTO_TESTNET_ON_DD": AUTO_TESTNET_ON_DD,
+        "EMERGENCY_POLICY": EMERGENCY_POLICY,
+        "EMERGENCY_MIN_PNL_TO_CLOSE_PCT": EMERGENCY_MIN_PNL_TO_CLOSE_PCT,
+        "EMERGENCY_STOP_FALLBACK_PCT": EMERGENCY_STOP_FALLBACK_PCT,
+        "CANDLE_LONG_MAX_POS_RATIO": CANDLE_LONG_MAX_POS_RATIO,
+        "CANDLE_SHORT_MIN_POS_RATIO": CANDLE_SHORT_MIN_POS_RATIO,
+        "OVERSIZE_TOLERANCE": OVERSIZE_TOLERANCE,
+    }
 

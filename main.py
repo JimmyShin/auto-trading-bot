@@ -14,6 +14,7 @@ from exchange_api import ExchangeAPI, BalanceAuthError, BalanceSyncError
 from strategy import DonchianATREngine
 from indicators import atr, is_near_funding
 from reporter import Reporter
+from alerts import slack_notify_safely
 
 try:
     from scripts.daily_report import generate_report as _gen_daily_report
@@ -91,6 +92,18 @@ def _ensure_protective_stop_on_restart(b: ExchangeAPI, eng: DonchianATREngine, s
             b.create_stop_market_safe(symbol, 'sell', float(stop_price), amt, reduce_only=True)
         else:
             b.create_stop_market_safe(symbol, 'buy', float(stop_price), amt, reduce_only=True)
+        # Persist the last known protective stop for visibility after restart
+        try:
+            st = eng.state.get(symbol, {}) if eng else {}
+            st['last_trail_stop'] = float(stop_price)
+            eng.state[symbol] = st
+            try:
+                from strategy import save_state as _save
+                _save(eng.state)
+            except Exception:
+                pass
+        except Exception:
+            pass
         print(f"[SAFE] {symbol} restart protective stop @ {float(stop_price):.4f}")
         return True
     except BalanceAuthError as auth_err:
@@ -164,6 +177,28 @@ def main():
     global b_global, eng_global
     b_global, eng_global = b, eng
 
+    # Log active config snapshot for traceability (secrets redacted)
+    try:
+        import json as _json
+        import config as cfg
+        cfg_snapshot = {
+            "env": "testnet" if cfg.TESTNET else "live",
+            "quote": cfg.QUOTE,
+            "universe": list(cfg.UNIVERSE),
+            "risk_pct": cfg.RISK_PCT,
+            "leverage": cfg.LEVERAGE,
+            "atr": {"len": cfg.ATR_LEN, "stop_k": cfg.ATR_STOP_K, "trail_k": cfg.ATR_TRAIL_K},
+            "daily_loss_limit": cfg.DAILY_LOSS_LIMIT,
+            "timeframe": cfg.TF,
+            "lookback": cfg.LOOKBACK,
+            "pyramiding": cfg.ENABLE_PYRAMIDING,
+            "position_cap": {"min": cfg.POSITION_CAP_MIN, "max": cfg.POSITION_CAP_MAX, "multiple": cfg.POSITION_CAP_MULTIPLE},
+            "data_dir": cfg.DATA_BASE_DIR,
+        }
+        logger.info("Active config snapshot: %s", _json.dumps(cfg_snapshot, ensure_ascii=False))
+    except Exception:
+        pass
+
     last_equity = 0.0
     try:
         last_equity = float(b.get_equity_usdt())
@@ -171,11 +206,19 @@ def main():
     except BalanceAuthError as auth_err:
         logger.error('Startup balance auth error: %s', auth_err)
         print('[FATAL] Binance authentication failed on startup; check API key/IP permissions.')
+        try:
+            slack_notify_safely(f":rotating_light: Startup auth failure: {auth_err}")
+        except Exception:
+            pass
         emergency_cleanup()
         return
     except BalanceSyncError as sync_err:
         logger.error('Startup balance sync error: %s', sync_err)
         print('[FATAL] Unable to sync with Binance server time on startup.')
+        try:
+            slack_notify_safely(f":rotating_light: Startup time sync failure: {sync_err}")
+        except Exception:
+            pass
         emergency_cleanup()
         return
     except Exception as bal_err:
@@ -185,10 +228,41 @@ def main():
     try:
         for symbol in UNIVERSE:
             _ensure_protective_stop_on_restart(b, eng, symbol)
+        # Sync entry_price in state from broker if missing (visibility and persistence)
+        for symbol in UNIVERSE:
+            try:
+                pos = b.position_for(symbol)
+                if not pos:
+                    continue
+                amt = abs(float(pos.get('contracts') or pos.get('positionAmt') or 0))
+                if amt <= 0:
+                    continue
+                entry_px = float(pos.get('entryPrice') or 0)
+                if entry_px > 0:
+                    st = eng.state.get(symbol, {}) if eng else {}
+                    if float(st.get('entry_price') or 0) <= 0:
+                        st['entry_price'] = entry_px
+                        # retain or derive side/in_position for consistency
+                        st['in_position'] = True
+                        if not st.get('side'):
+                            side_label = (pos.get('side') or ('long' if (pos.get('contracts') or 0) > 0 else 'short')).lower()
+                            st['side'] = side_label
+                        eng.state[symbol] = st
+                        try:
+                            from strategy import save_state as _save
+                            _save(eng.state)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
         print("Trading loop starting...")
     except BalanceAuthError as auth_err:
         logger.error('Startup protective stop auth error: %s', auth_err)
         print('[FATAL] Binance rejected credentials while restoring protective stops.')
+        try:
+            slack_notify_safely(f":rotating_light: Protective stop restore failed: {auth_err}")
+        except Exception:
+            pass
         emergency_cleanup()
         return
     except Exception as e:
@@ -209,11 +283,19 @@ def main():
             except BalanceAuthError as auth_err:
                 logger.error('Balance auth error: %s', auth_err)
                 print('[FATAL] Binance authentication failed; stopping bot for safety.')
+                try:
+                    slack_notify_safely(f":rotating_light: Runtime auth failure: {auth_err}")
+                except Exception:
+                    pass
                 emergency_cleanup()
                 raise SystemExit(1)
             except BalanceSyncError as sync_err:
                 logger.error('Balance sync failure: %s', sync_err)
                 print('[FATAL] Unable to stay behind Binance server time; stopping bot.')
+                try:
+                    slack_notify_safely(f":rotating_light: Runtime time sync failure: {sync_err}")
+                except Exception:
+                    pass
                 emergency_cleanup()
                 raise SystemExit(2)
             except Exception as bal_err:
@@ -235,9 +317,18 @@ def main():
                             if _pos and _amt > 0:
                                 _side = (_pos.get('side') or ('long' if (_pos.get('contracts') or 0) > 0 else 'short')).lower()
                                 _st = eng.state.get(_sym, {}) if eng else {}
-                                _entry = float(_st.get('entry_price') or 0)
+                                # Prefer broker entryPrice for visibility; fall back to state
+                                _entry_broker = 0.0
+                                try:
+                                    _entry_broker = float(_pos.get('entryPrice') or 0)
+                                except Exception:
+                                    _entry_broker = 0.0
+                                _entry_state = float(_st.get('entry_price') or 0)
+                                _entry = _entry_state if _entry_state > 0 else _entry_broker
+                                # Last known protective/trailing stop from state (persisted when we place it)
                                 _trail = _st.get('last_trail_stop')
-                                print(f"[POS] {_sym} {_side} qty={_amt:.6f} entry={_entry:.4f} stop={(float(_trail) if _trail else 0):.4f}")
+                                _trail_val = float(_trail) if _trail is not None else 0.0
+                                print(f"[POS] {_sym} {_side} qty={_amt:.6f} entry={_entry:.4f} stop={_trail_val:.4f}")
                         except Exception:
                             pass
                 except Exception:
@@ -386,19 +477,19 @@ def main():
                             order = b.create_market_order_safe(symbol, side_order, qty)
                             eff_qty = float(order.get('amount', qty) or qty)
                             if side_order == 'buy':
-                                b.create_stop_market(symbol, 'sell', stop_price, eff_qty, reduce_only=True)
+                                b.create_stop_market_safe(symbol, 'sell', stop_price, eff_qty, reduce_only=True)
                                 eng.update_symbol_state_on_entry(symbol, 'long', close, eff_qty)
                                 log_trade(symbol, 'LONG', close, eff_qty, 'MA_CROSS')
                                 try:
-                                    log_detailed_entry(symbol, 'LONG', close, eff_qty, stop_price, plan.get('risk_multiplier', 1.0), plan.get('signal', {}), atr_abs, eq, 'MA_ALIGNMENT', plan.get('reasons'))
+                                    log_detailed_entry(symbol, 'LONG', close, eff_qty, stop_price, plan.get('risk_multiplier', 1.0), atr_abs, plan.get('signal', {}), eq, 'MA_ALIGNMENT', plan.get('reasons'))
                                 except Exception:
                                     pass
                             else:
-                                b.create_stop_market(symbol, 'buy', stop_price, eff_qty, reduce_only=True)
+                                b.create_stop_market_safe(symbol, 'buy', stop_price, eff_qty, reduce_only=True)
                                 eng.update_symbol_state_on_entry(symbol, 'short', close, eff_qty)
                                 log_trade(symbol, 'SHORT', close, eff_qty, 'MA_CROSS')
                                 try:
-                                    log_detailed_entry(symbol, 'SHORT', close, eff_qty, stop_price, plan.get('risk_multiplier', 1.0), plan.get('signal', {}), atr_abs, eq, 'MA_ALIGNMENT', plan.get('reasons'))
+                                    log_detailed_entry(symbol, 'SHORT', close, eff_qty, stop_price, plan.get('risk_multiplier', 1.0), atr_abs, plan.get('signal', {}), eq, 'MA_ALIGNMENT', plan.get('reasons'))
                                 except Exception:
                                     pass
                             print(f"[ENTRY] {symbol} {decision} qty={eff_qty:.6f} px={close:.4f} stop={stop_price:.4f}")
@@ -450,7 +541,18 @@ def main():
                                     date_str = datetime.now().strftime('%Y-%m-%d')
                                     env_label = 'testnet' if ('TESTNET' in globals() and TESTNET) else 'live'
                                     base_dir = DATA_BASE_DIR if 'DATA_BASE_DIR' in globals() else 'data'
-                                    _gen_daily_report(date_str, env_label, base_dir)
+                                    out_path, summary = _gen_daily_report(date_str, env_label, base_dir)
+                                    try:
+                                        trades = int(summary.get('trades', 0))
+                                        wins = int(summary.get('wins', 0))
+                                        losses = int(summary.get('losses', 0))
+                                        win_rate = summary.get('win_rate_pct')
+                                        gross_win = summary.get('gross_win_pct')
+                                        gross_loss = summary.get('gross_loss_pct')
+                                        pf = summary.get('profit_factor')
+                                        slack_notify_safely(f"Daily {env_label} summary {date_str}: trades={trades} wins={wins} losses={losses} win_rate={win_rate}% PF={pf} gross+={gross_win}% gross-={gross_loss}%")
+                                    except Exception:
+                                        pass
                             except Exception:
                                 pass
                         except Exception as e:
