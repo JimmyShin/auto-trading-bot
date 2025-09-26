@@ -2,11 +2,17 @@
 
 import os
 import json
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
+
+import threading
+import time
+from collections import deque
 
 import glob
 import csv
 import requests
+
+from metrics import get_metrics_manager
 
 
 class SlackNotifier:
@@ -230,4 +236,193 @@ def slack_notify_exit(
         f"Equity: ${equity_usdt:,.2f} | DD: {dd_text}\n"
         f"fallback_trades_30: {fallback_count}/{N}"
     )
+    metrics_mgr = get_metrics_manager()
+    if metrics_mgr:
+        try:
+            metrics_mgr.set_avg_r(float(avg_r_value) if avg_r_value is not None else float("nan"))
+        except Exception:
+            pass
     return slack_notify_safely(msg)
+
+
+class AlertScheduler(threading.Thread):
+    """Background scheduler for observability alerts."""
+
+    def __init__(
+        self,
+        metrics_manager,
+        config: Dict[str, Any],
+        slack_sender: Callable[[str], bool] = slack_notify_safely,
+        *,
+        interval_sec: float = 60.0,
+        now_fn: Optional[Callable[[], float]] = None,
+    ) -> None:
+        super().__init__(name="alert-scheduler", daemon=True)
+        self.metrics = metrics_manager
+        self.config = config or {}
+        self.slack = slack_sender
+        self.interval = interval_sec
+        self.now_fn = now_fn or time.time
+        self.cooldowns: Dict[str, float] = {}
+        self.last_heartbeat_sent = 0.0
+        self.last_heartbeat_trades = 0.0
+        self.error_history: deque = deque()
+        self.activity_history: deque = deque()
+        self.drift_history: deque = deque()
+        self._prev_error_totals: Dict[str, float] = {}
+
+    # Thread loop ---------------------------------------------------------
+    def run(self) -> None:  # pragma: no cover - exercised in integration
+        while True:
+            self.run_step()
+            time.sleep(self.interval)
+
+    # Public helper for tests ---------------------------------------------
+    def run_step(self) -> None:
+        now = self.now_fn()
+        snapshot = self.metrics.get_snapshot() if self.metrics else {}
+        self._record_histories(now, snapshot)
+        self._send_heartbeat_if_needed(now, snapshot)
+        self._check_heartbeat_missing(now, snapshot)
+        self._check_clock_drift(now)
+        self._check_error_burst(now)
+        self._check_no_trade(now)
+
+    # Internal helpers ----------------------------------------------------
+    def _record_histories(self, now: float, snap: Dict[str, Any]) -> None:
+        signal_totals = snap.get("signal_totals", {}) or {}
+        total_signals = float(sum(signal_totals.values()))
+        trade_total = float(snap.get("trade_total", 0.0))
+        self.activity_history.append((now, total_signals, trade_total))
+        window = float(self.config.get("no_trade_window_sec", 7200))
+        while self.activity_history and now - self.activity_history[0][0] > window:
+            self.activity_history.popleft()
+
+        current_errors = {k: float(v) for k, v in (snap.get("order_errors", {}) or {}).items()}
+        delta_errors: Dict[str, float] = {}
+        for reason, total in current_errors.items():
+            previous = float(self._prev_error_totals.get(reason, 0.0))
+            delta = max(0.0, total - previous)
+            if delta:
+                delta_errors[reason] = delta
+        self.error_history.append((now, delta_errors))
+        self._prev_error_totals = current_errors
+        error_window = float(self.config.get("error_burst_window_sec", 300))
+        while self.error_history and now - self.error_history[0][0] > error_window:
+            self.error_history.popleft()
+
+        drift_map = snap.get("time_drift", {}) or {}
+        if "exchange" in drift_map:
+            self.drift_history.append((now, float(drift_map["exchange"])))
+        drift_window = 180.0
+        while self.drift_history and now - self.drift_history[0][0] > drift_window:
+            self.drift_history.popleft()
+
+        # Update cached heartbeat time if snapshot provided
+        # No-op: heartbeat timestamp used in downstream checks
+
+    def _send_heartbeat_if_needed(self, now: float, snap: Dict[str, Any]) -> None:
+        interval = float(self.config.get("heartbeat_interval_sec", 43200))
+        if interval <= 0:
+            return
+        if now - self.last_heartbeat_sent < interval:
+            return
+        account = self.config.get("account_label", "live")
+        run_id = (os.getenv("GITHUB_SHA") or os.getenv("RUN_ID") or "local")[:7]
+        equity = float(snap.get("equity", 0.0))
+        avg_r = snap.get("avg_r", float("nan"))
+        avg_r_text = "N/A" if isinstance(avg_r, float) and avg_r != avg_r else f"{avg_r:.3f}"
+        trade_total = float(snap.get("trade_total", 0.0))
+        trade_delta = trade_total - self.last_heartbeat_trades
+        heartbeat_ts = float(snap.get("heartbeat_ts", now))
+        message = (
+            f"HB ✅ run:{run_id} account:{account} eq:{equity:.2f} avgR(ATR30):{avg_r_text} "
+            f"tradesΔ:{int(trade_delta)} ts:{int(heartbeat_ts)}"
+        )
+        if self.slack(message):
+            self.last_heartbeat_sent = now
+            self.last_heartbeat_trades = trade_total
+
+    def _check_heartbeat_missing(self, now: float, snap: Dict[str, Any]) -> None:
+        missing_sec = float(self.config.get("heartbeat_missing_sec", 64800))
+        heartbeat_ts = float(snap.get("heartbeat_ts", 0.0))
+        if not heartbeat_ts:
+            return
+        if now - heartbeat_ts <= missing_sec:
+            return
+        if self._should_alert("heartbeat_missing", now):
+            self.slack("⚠️ Heartbeat missing: no updates in the last period. Check bot loop/metrics.")
+
+    def _check_clock_drift(self, now: float) -> None:
+        if not self.drift_history:
+            return
+        threshold = float(self.config.get("clock_drift_warn_ms", 5000.0))
+        window = 180.0
+        recent = [entry for entry in self.drift_history if now - entry[0] <= window]
+        if len(recent) < max(3, int(window // max(self.interval, 1))):
+            return
+        if all(abs(val) >= threshold for _, val in recent):
+            latest = recent[-1][1]
+            if self._should_alert("clock_drift", now):
+                direction = "+" if latest >= 0 else ""
+                self.slack(f"⚠️ Clock drift: {direction}{int(latest)}ms (>{int(threshold)}). Check NTP/exchange sync.")
+
+    def _check_error_burst(self, now: float) -> None:
+        if not self.error_history:
+            return
+        threshold = float(self.config.get("error_burst_threshold", 10))
+        window = float(self.config.get("error_burst_window_sec", 300))
+        totals: Dict[str, float] = {}
+        total_errors = 0.0
+        for ts, delta_map in self.error_history:
+            if now - ts > window:
+                continue
+            for reason, value in delta_map.items():
+                totals[reason] = totals.get(reason, 0.0) + value
+                total_errors += value
+        if total_errors >= threshold and self._should_alert("error_burst", now):
+            top_reason = max(totals.items(), key=lambda item: item[1])[0] if totals else "unknown"
+            self.slack(
+                f"⚠️ Error burst: {int(total_errors)} errors/{int(window/60)}m ({top_reason}). Investigate failures."
+            )
+
+    def _check_no_trade(self, now: float) -> None:
+        if not self.activity_history:
+            return
+        window = float(self.config.get("no_trade_window_sec", 7200))
+        min_signals = float(self.config.get("no_trade_signals_min", 5))
+        signals_start, trades_start = None, None
+        for ts, sig_total, trade_total in self.activity_history:
+            if now - ts <= window:
+                signals_start = sig_total if signals_start is None else signals_start
+                trades_start = trade_total if trades_start is None else trades_start
+                break
+        if signals_start is None or trades_start is None:
+            return
+        _, signals_end, trades_end = self.activity_history[-1]
+        signal_delta = signals_end - signals_start
+        trade_delta = trades_end - trades_start
+        if signal_delta >= min_signals and trade_delta <= 0 and self._should_alert("no_trade", now):
+            self.slack(
+                f"⚠️ Signals: {int(signal_delta)} in {int(window/3600)}h but no trades. Review filters/routing."
+            )
+
+    def _should_alert(self, key: str, now: float) -> bool:
+        cooldown = float(self.config.get("alert_cooldown_sec", 600))
+        last = self.cooldowns.get(key)
+        if last is not None and now - last < cooldown:
+            return False
+        self.cooldowns[key] = now
+        return True
+
+
+def start_alert_scheduler(
+    config: Dict[str, Any],
+    metrics_manager=None,
+    *,
+    slack_sender: Callable[[str], bool] = slack_notify_safely,
+    interval_sec: float = 60.0,
+) -> AlertScheduler:
+    scheduler = AlertScheduler(metrics_manager or get_metrics_manager(), config, slack_sender, interval_sec=interval_sec)
+    scheduler.start()
+    return scheduler

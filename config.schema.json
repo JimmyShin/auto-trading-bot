@@ -41,6 +41,22 @@
         "max_retries": { "type": "integer" }
       }
     },
+    "observability": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "metrics_port": { "type": "integer" },
+        "heartbeat_interval_sec": { "type": "integer" },
+        "heartbeat_missing_sec": { "type": "integer" },
+        "clock_drift_warn_ms": { "type": "number" },
+        "error_burst_threshold": { "type": "integer" },
+        "error_burst_window_sec": { "type": "integer" },
+        "no_trade_signals_min": { "type": "integer" },
+        "no_trade_window_sec": { "type": "integer" },
+        "alert_cooldown_sec": { "type": "integer" },
+        "account_label": { "type": "string" }
+      }
+    },
     "position_cap": {
       "type": "object",
       "additionalProperties": false,

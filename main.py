@@ -16,7 +16,8 @@ from exchange_api import ExchangeAPI, BalanceAuthError, BalanceSyncError
 from strategy import DonchianATREngine
 from indicators import atr, is_near_funding
 from reporter import Reporter
-from alerts import slack_notify_safely, slack_notify_exit
+from alerts import slack_notify_safely, slack_notify_exit, start_alert_scheduler
+from metrics import start_metrics_server, get_metrics_manager
 from slack_notify import notify_emergency
 
 try:
@@ -348,7 +349,7 @@ def emergency_cleanup(reason: str = "manual") -> None:
     manager = emergency_manager
     if manager:
         try:
-            manager.execute_cleanup(reason, datetime.now(timezone.utc))
+            emergency_mgr.execute_cleanup(reason, datetime.now(timezone.utc))
         except Exception as exc:
             print(f"[WARN] emergency cleanup failed: {exc}")
     else:
@@ -377,12 +378,18 @@ def main():
     print(f"Symbols: {', '.join(UNIVERSE)}")
     print("="*40)
 
+    metrics_port = int(OBSERVABILITY.get("metrics_port", 9108))
+    account_label = str(OBSERVABILITY.get("account_label", "live"))
+    metrics_mgr = start_metrics_server(metrics_port, account_label)
+    metrics_mgr.set_heartbeat()
+    start_alert_scheduler(OBSERVABILITY, metrics_mgr)
+
     b = ExchangeAPI()
     b.connect()
     eng = DonchianATREngine()
     global b_global, eng_global
     b_global, eng_global = b, eng
-    manager = EmergencyManager(
+    emergency_mgr = EmergencyManager(
         exchange=b,
         engine=eng,
         universe=UNIVERSE,
@@ -393,11 +400,11 @@ def main():
         kill_switch=KILL_SWITCH,
     )
     global emergency_manager
-    emergency_manager = manager
+    emergency_manager = emergency_mgr
 
     def _check_kill_switch() -> None:
-        if manager.should_trigger_kill_switch():
-            notify_emergency("[CRITICAL] Kill-switch activated due to repeated failures → bot terminated.")
+        if emergency_mgr.should_trigger_kill_switch():
+            notify_emergency("[CRITICAL] Kill-switch activated due to repeated failures -> bot terminated.")
             emergency_cleanup("kill-switch")
             raise SystemExit(1)
 
@@ -430,7 +437,8 @@ def main():
     except BalanceAuthError as auth_err:
         logger.error('Startup balance auth error: %s', auth_err)
         print('[FATAL] Binance authentication failed on startup; check API key/IP permissions.')
-        manager.record_error('auth')
+        metrics_mgr.inc_order_error('auth')
+        emergency_mgr.record_error('auth')
         try:
             slack_notify_safely(f":rotating_light: Startup auth failure: {auth_err}")
         except Exception:
@@ -441,7 +449,8 @@ def main():
     except BalanceSyncError as sync_err:
         logger.error('Startup balance sync error: %s', sync_err)
         print('[FATAL] Unable to sync with Binance server time on startup.')
-        manager.record_error('time_drift')
+        metrics_mgr.inc_order_error('time_drift')
+        emergency_mgr.record_error('time_drift')
         try:
             slack_notify_safely(f":rotating_light: Startup time sync failure: {sync_err}")
         except Exception:
@@ -472,10 +481,11 @@ def main():
     last_heartbeat = 0.0
 
     while True:
+        loop_start = time.perf_counter()
         lock.acquire()
         try:
             now_utc = datetime.now(timezone.utc)
-            entries_blocked = manager.should_block_entries(now_utc)
+            entries_blocked = emergency_mgr.should_block_entries(now_utc)
             eq = last_equity
             try:
                 fresh_eq = float(b.get_equity_usdt())
@@ -485,7 +495,7 @@ def main():
             except BalanceAuthError as auth_err:
                 logger.error('Balance auth error: %s', auth_err)
                 print('[FATAL] Binance authentication failed; stopping bot for safety.')
-                manager.record_error('auth')
+                emergency_mgr.record_error('auth')
                 try:
                     slack_notify_safely(f":rotating_light: Runtime auth failure: {auth_err}")
                 except Exception:
@@ -496,7 +506,7 @@ def main():
             except BalanceSyncError as sync_err:
                 logger.error('Balance sync failure: %s', sync_err)
                 print('[FATAL] Unable to stay behind Binance server time; stopping bot.')
-                manager.record_error('time_drift')
+                emergency_mgr.record_error('time_drift')
                 try:
                     slack_notify_safely(f":rotating_light: Runtime time sync failure: {sync_err}")
                 except Exception:
@@ -510,6 +520,15 @@ def main():
                     print(f'[WARN] Using cached equity {last_equity:.2f} after balance error.')
                 else:
                     print(f'[WARN] Balance fetch failed before first successful read: {bal_err}')
+            metrics_mgr.set_equity(eq)
+            raw_client = getattr(b, 'raw', None)
+            if raw_client is not None:
+                drift = getattr(raw_client, 'time_diff', None)
+                if drift is not None:
+                    try:
+                        metrics_mgr.set_time_drift('exchange', float(drift))
+                    except Exception:
+                        pass
             # Heartbeat every ~30s
             now = time.time()
             if now - last_heartbeat > 30:
@@ -577,11 +596,11 @@ def main():
                         sig = plan.get('signal', {})
                         anchor = float(((eng.state or {}).get('daily') or {}).get('anchor', eq) if hasattr(eng,'state') else eq)
                         dd_ratio = max(0.0, (anchor - eq) / max(anchor, 1e-9)) if anchor else 0.0
-                        if manager.handle_daily_drawdown(dd_ratio, now_utc):
-                            entries_blocked = manager.should_block_entries(now_utc)
+                        if emergency_mgr.handle_daily_drawdown(dd_ratio, now_utc):
+                            entries_blocked = emergency_mgr.should_block_entries(now_utc)
+                        metrics_mgr.set_daily_drawdown(dd_ratio)
                         dd_pct = dd_ratio * 100.0
-                        if manager:
-                            entries_blocked = manager.should_block_entries(now_utc)
+                        entries_blocked = emergency_mgr.should_block_entries(now_utc)
                         log_signal_analysis(symbol, close, sig, is_new_bar, funding_avoid, daily_loss_hit, eq, dd_pct, plan.get('decision'), plan.get('skip_reason'))
                     except Exception as _e:
                         print(f"[WARN] signal log error {symbol}: {_e}")
@@ -675,6 +694,11 @@ def main():
                             pass
 
                     decision = plan.get('decision')
+                    if is_new_bar and decision in ('ENTER_LONG', 'ENTER_SHORT'):
+                        try:
+                            metrics_mgr.inc_signal(symbol, TF)
+                        except Exception:
+                            pass
                     if not entries_blocked and decision in ('ENTER_LONG','ENTER_SHORT'):
                         if has_pos:
                             continue
@@ -760,6 +784,10 @@ def main():
                                     pass
                             print(f"[ENTRY] {symbol} {decision} qty={eff_qty:.6f} px={close:.4f} stop={stop_price:.4f}")
                         except Exception as e:
+                            try:
+                                metrics_mgr.inc_order_error('order')
+                            except Exception:
+                                pass
                             print(f"[WARN] entry failed {symbol}: {e}")
 
                     # Detect exit (position disappeared while state says in_position)
@@ -819,6 +847,10 @@ def main():
                                 except Exception:
                                     equity_now = 0.0
                                 slack_notify_exit(symbol, side_state, entry_px, exit_price_used, qty, float(pnl_usdt), float(pnl_pct), equity_now)
+                                try:
+                                    metrics_mgr.inc_trade_count()
+                                except Exception:
+                                    pass
                             except Exception:
                                 pass
                             # Update daily report
@@ -854,9 +886,11 @@ def main():
             try:
                 msg = str(e).lower()
                 if 'nonce' in msg:
-                    manager.record_error('nonce')
+                    emergency_mgr.record_error('nonce')
+                    metrics_mgr.inc_order_error('nonce')
                 elif 'timestamp' in msg or 'time drift' in msg:
-                    manager.record_error('time_drift')
+                    emergency_mgr.record_error('time_drift')
+                    metrics_mgr.inc_order_error('time_drift')
                 _check_kill_switch()
             except Exception:
                 pass
@@ -864,6 +898,7 @@ def main():
             print("3s retry...")
             time.sleep(3)
         finally:
+            metrics_mgr.observe_loop_latency((time.perf_counter() - loop_start) * 1000.0)
             lock.release()
 
 

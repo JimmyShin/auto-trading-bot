@@ -8,9 +8,12 @@ services:
       - .env
     environment:
       - PYTHONUNBUFFERED=1
+      - METRICS_PORT=9108
     volumes:
       - ./data:/app/data
       - ./state.json:/app/state.json
+    ports:
+      - "9108:9108"
     healthcheck:
       test: ["CMD", "python", "scripts/healthcheck.py"]
       interval: 30s

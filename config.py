@@ -95,6 +95,20 @@ KILL_SWITCH = {
     "time_drift_sec": float(os.getenv("KILL_SWITCH_TIME_DRIFT_SEC", "5")),
     "max_retries": int(os.getenv("KILL_SWITCH_MAX_RETRIES", "3")),
 }
+
+
+OBSERVABILITY = {
+    "metrics_port": int(os.getenv("METRICS_PORT", "9108")),
+    "heartbeat_interval_sec": int(os.getenv("OBS_HEARTBEAT_INTERVAL_SEC", "43200")),
+    "heartbeat_missing_sec": int(os.getenv("OBS_HEARTBEAT_MISSING_SEC", "64800")),
+    "clock_drift_warn_ms": float(os.getenv("OBS_CLOCK_DRIFT_WARN_MS", "5000")),
+    "error_burst_threshold": int(os.getenv("OBS_ERROR_BURST_THRESHOLD", "10")),
+    "error_burst_window_sec": int(os.getenv("OBS_ERROR_BURST_WINDOW_SEC", "300")),
+    "no_trade_signals_min": int(os.getenv("OBS_NO_TRADE_SIGNALS_MIN", "5")),
+    "no_trade_window_sec": int(os.getenv("OBS_NO_TRADE_WINDOW_SEC", "7200")),
+    "alert_cooldown_sec": int(os.getenv("OBS_ALERT_COOLDOWN_SEC", "600")),
+    "account_label": os.getenv("OBS_ACCOUNT_LABEL", "live"),
+}
 CONFIG_JSON_PATH = Path(os.getenv("BOT_CONFIG_JSON", "config.json"))
 
 # --- JSON Schema validation helpers ---
@@ -258,6 +272,23 @@ if CONFIG_JSON_PATH.exists():
             KILL_SWITCH['time_drift_sec'] = float(ks['time_drift_sec'])
         if 'max_retries' in ks:
             KILL_SWITCH['max_retries'] = int(ks['max_retries'])
+    if 'observability' in _json_config:
+        obs = _json_config['observability'] or {}
+        for key, value in obs.items():
+            if key not in OBSERVABILITY:
+                continue
+            target = OBSERVABILITY[key]
+            try:
+                if isinstance(target, bool):
+                    OBSERVABILITY[key] = _coerce_bool(value)
+                elif isinstance(target, int):
+                    OBSERVABILITY[key] = int(value)
+                elif isinstance(target, float):
+                    OBSERVABILITY[key] = float(value)
+                else:
+                    OBSERVABILITY[key] = str(value)
+            except Exception:
+                OBSERVABILITY[key] = target
     if 'position_cap' in _json_config:
         pc = _json_config['position_cap'] or {}
         if 'multiple' in pc:
@@ -299,6 +330,7 @@ def active_config_snapshot() -> Dict[str, Any]:
         "EMERGENCY_MIN_PNL_TO_CLOSE_PCT": EMERGENCY_MIN_PNL_TO_CLOSE_PCT,
         "EMERGENCY_STOP_FALLBACK_PCT": EMERGENCY_STOP_FALLBACK_PCT,
         "KILL_SWITCH": KILL_SWITCH,
+        "OBSERVABILITY": OBSERVABILITY,
         "CANDLE_LONG_MAX_POS_RATIO": CANDLE_LONG_MAX_POS_RATIO,
         "CANDLE_SHORT_MIN_POS_RATIO": CANDLE_SHORT_MIN_POS_RATIO,
         "OVERSIZE_TOLERANCE": OVERSIZE_TOLERANCE,
