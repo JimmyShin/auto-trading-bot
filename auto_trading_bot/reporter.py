@@ -77,11 +77,11 @@ class Reporter:
         self._last_dd_ratio: float = 0.0
 
     @classmethod
-    def from_config(cls) -> Reporter:
+    def from_config(cls, *, metrics: Optional[Any] = None) -> Reporter:
         from config import DATA_BASE_DIR, TESTNET
 
         env = "testnet" if TESTNET else "live"
-        return cls(DATA_BASE_DIR, env)
+        return cls(DATA_BASE_DIR, env, metrics=metrics)
 
     def apply_equity_snapshot(
         self,

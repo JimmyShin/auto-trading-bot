@@ -1,4 +1,6 @@
-﻿import os
+﻿from __future__ import annotations
+
+import os
 import time
 import signal
 import atexit
@@ -16,8 +18,8 @@ from auto_trading_bot.exchange_api import ExchangeAPI, BalanceAuthError, Balance
 from strategy import DonchianATREngine
 from indicators import atr, is_near_funding
 from auto_trading_bot.reporter import Reporter
-from auto_trading_bot.alerts import slack_notify_safely, slack_notify_exit, start_alert_scheduler
-from auto_trading_bot.metrics import start_metrics_server, get_metrics_manager
+from auto_trading_bot.alerts import Alerts, slack_notify_safely, slack_notify_exit, start_alert_scheduler
+from auto_trading_bot.metrics import Metrics, start_metrics_server, get_metrics_manager
 from slack_notify import notify_emergency
 
 try:
@@ -38,7 +40,17 @@ if not logger.handlers:
         pass
     logger.addHandler(_ch)
 
-reporter = Reporter.from_config()
+metrics_store = Metrics()
+reporter = Reporter.from_config(metrics=metrics_store)
+alerts = Alerts(
+    metrics_store,
+    heartbeat_interval_sec=OBSERVABILITY.get("heartbeat_interval_sec", 60) if "OBSERVABILITY" in globals() else 60,
+    dd_guard_threshold=OBSERVABILITY.get("dd_guard_threshold", 0.20) if "OBSERVABILITY" in globals() else 0.20,
+    dedupe_window_sec=OBSERVABILITY.get("guard_dedupe_sec", 300) if "OBSERVABILITY" in globals() else 300,
+    guard_action=lambda ratio: emergency_cleanup("drawdown_guard"),
+    source="binance-usdm-testnet" if TESTNET else "binance-usdm",
+    account_mode="testnet" if TESTNET else "live",
+)
 log_trade = reporter.log_trade
 log_exit = reporter.log_exit
 log_signal_analysis = reporter.log_signal_analysis
@@ -239,7 +251,7 @@ class EmergencyManager:
             self.auto_testnet_armed = True
             self.block_entries_until = self._next_utc_midnight(now)
             self.exchange.set_testnet(True)
-            self.notify("[EMERGENCY] AUTO_TESTNET_ON_DD triggered → switched to testnet, live entries disabled until UTC reset.")
+            self.alerts.evaluate(equity=None, peak_equity=None, now_utc=now)
             return True
         return False
 
@@ -559,34 +571,24 @@ def main():
 
     last_equity = 0.0
     try:
-        last_equity = float(b.get_equity_usdt())
-        eng.reset_daily_anchor(last_equity)
+        snap = b.fetch_equity_snapshot()
+        last_equity = snap.margin_balance
+        metrics_mgr.set_equity(last_equity)
+        reporter.apply_equity_snapshot(snap, now_utc=snap.ts_utc)
+        alerts.evaluate(equity=snap.margin_balance, peak_equity=None, now_utc=snap.ts_utc)
+        alerts.maybe_emit_heartbeat(now_utc=snap.ts_utc)
+        logger.info("Startup equity snapshot margin=%.2f", last_equity)
     except BalanceAuthError as auth_err:
         logger.error('Startup balance auth error: %s', auth_err)
-        print('[FATAL] Binance authentication failed on startup; check API key/IP permissions.')
-        metrics_mgr.inc_order_error('auth')
-        emergency_mgr.record_error('auth')
-        try:
-            slack_notify_safely(f":rotating_light: Startup auth failure: {auth_err}")
-        except Exception:
-            pass
-        _check_kill_switch()
-        emergency_cleanup("startup-auth")
-        return
+        slack_notify_safely(f":rotating_light: Startup auth failure: {auth_err}")
+        raise
     except BalanceSyncError as sync_err:
         logger.error('Startup balance sync error: %s', sync_err)
-        print('[FATAL] Unable to sync with Binance server time on startup.')
-        metrics_mgr.inc_order_error('time_drift')
-        emergency_mgr.record_error('time_drift')
-        try:
-            slack_notify_safely(f":rotating_light: Startup time sync failure: {sync_err}")
-        except Exception:
-            pass
-        _check_kill_switch()
-        emergency_cleanup("startup-sync")
-        return
+        slack_notify_safely(f":rotating_light: Startup time sync failure: {sync_err}")
+        raise
     except Exception as bal_err:
         logger.warning('Startup balance fetch failed; continuing with 0 equity: %s', bal_err)
+        last_equity = 0.0
 
     # On startup, re-arm protective stops and sync state for any existing positions
     try:
@@ -615,10 +617,13 @@ def main():
             entries_blocked = emergency_mgr.should_block_entries(now_utc)
             eq = last_equity
             try:
-                fresh_eq = float(b.get_equity_usdt())
-                eq = fresh_eq
-                last_equity = fresh_eq
-                eng.reset_daily_anchor(fresh_eq)
+                snap = b.fetch_equity_snapshot()
+                reporter.apply_equity_snapshot(snap, now_utc=snap.ts_utc)
+                eq = snap.margin_balance
+                last_equity = eq
+                eng.reset_daily_anchor(eq)
+                alerts.evaluate(equity=eq, peak_equity=None, now_utc=snap.ts_utc)
+                alerts.maybe_emit_heartbeat(now_utc=snap.ts_utc)
             except BalanceAuthError as auth_err:
                 logger.error('Balance auth error: %s', auth_err)
                 print('[FATAL] Binance authentication failed; stopping bot for safety.')

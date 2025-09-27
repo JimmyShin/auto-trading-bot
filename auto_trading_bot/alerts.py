@@ -30,6 +30,7 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple
 import requests
 
 from auto_trading_bot.metrics import get_metrics_manager
+from auto_trading_bot.slack_notifier import SlackNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -119,43 +120,13 @@ def _log_alert_payload(snapshot: Dict[str, Any], *, trades_delta: Optional[float
     _log_alerts_event("ALERTS_INPUT", payload)
 
 
-class SlackNotifier:
-    def __init__(self, webhook_url: Optional[str]) -> None:
-        self.webhook_url = (webhook_url or "").strip()
-
-    @classmethod
-    def from_env(cls) -> "SlackNotifier":
-        return cls(os.getenv("SLACK_WEBHOOK_URL"))
-
-    def enabled(self) -> bool:
-        return bool(self.webhook_url)
-
-    def send(self, text: str, *, blocks: Optional[List[Dict[str, Any]]] = None) -> bool:
-        if not self.enabled():
-            return False
-        payload: Dict[str, Any] = {"text": str(text)}
-        if blocks:
-            payload["blocks"] = blocks
-        try:
-            resp = requests.post(
-                self.webhook_url,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=5,
-            )
-            return 200 <= resp.status_code < 300
-        except Exception as exc:
-            logger.warning("Slack notify failed: %s", exc)
-            return False
-
-
 _SLACK: Optional[SlackNotifier] = None  # lazy singleton
 
 
 def _get_notifier() -> SlackNotifier:
     global _SLACK
     if _SLACK is None:
-        _SLACK = SlackNotifier.from_env()
+        _SLACK = SlackNotifier()
     return _SLACK
 
 
@@ -1151,7 +1122,14 @@ class Alerts:
             "source": self._source,
         }
         self._logger.info(json.dumps(payload_guard, sort_keys=True, default=_safe_json_value))
-        self._logger.info(RUNBOOK_HEADER)
+        body = (
+            f":rotating_light: AUTO_TESTNET_ON_DD triggered\n"
+            f"dd={dd_ratio * 100:.1f}% (threshold={self._dd_threshold * 100:.1f}%) | "
+            f"mode={self._account_mode} | source={self._source}"
+        )
+        message = f"{RUNBOOK_HEADER}\n\n{body}"
+        notifier = _get_notifier()
+        notifier.send_markdown(message)
 
         if self._guard_action is not None:
             try:
