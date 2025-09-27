@@ -6,6 +6,7 @@ import math
 import os
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
@@ -15,6 +16,7 @@ __all__ = [
     "get_metrics_manager",
     "dump_current_metrics",
     "MetricsManager",
+    "Metrics",
 ]
 
 
@@ -233,3 +235,35 @@ def dump_current_metrics() -> Dict[str, Any]:
     snapshot = mgr.get_snapshot()
     snapshot["account"] = mgr.account
     return snapshot
+
+
+class Metrics:
+    """Stores normalized daily drawdown ratio (0..1) and exposes read helpers."""
+
+    def __init__(self) -> None:
+        self._dd_ratio: float = 0.0
+        self._dd_ts: Optional[datetime] = None
+        self._dd_equity: Optional[float] = None
+
+    def update_daily_drawdown(self, ratio: float, *, equity: float, ts: datetime) -> None:
+        if ts.tzinfo is None or ts.utcoffset() is None:
+            raise ValueError("ts must be timezone-aware")
+        if ts.utcoffset() != timedelta(0):
+            raise ValueError("ts must be in UTC")
+
+        ratio_clamped = max(0.0, min(1.0, float(ratio)))
+        if self._dd_ts is not None and ts <= self._dd_ts:
+            return
+
+        self._dd_ratio = ratio_clamped
+        self._dd_equity = float(equity)
+        self._dd_ts = ts
+
+    def bot_daily_drawdown(self) -> float:
+        return self._dd_ratio
+
+    def last_drawdown_timestamp(self) -> Optional[datetime]:
+        return self._dd_ts
+
+    def last_drawdown_equity(self) -> Optional[float]:
+        return self._dd_equity
