@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import csv
 import json
+import time
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Callable, Iterable
+from decimal import Decimal
 
 
 import logging
@@ -12,13 +14,17 @@ import math
 import pandas as pd
 
 
+from auto_trading_bot.exchange_api import EquitySnapshot
+
 
 logger = logging.getLogger(__name__)
 
 _DEBUG_VALUES = {"1", "true", "yes", "on"}
 
+
 def _debug_enabled() -> bool:
     return os.getenv("OBS_DEBUG_ALERTS", "").strip().lower() in _DEBUG_VALUES
+
 
 def _safe_number(value: Any) -> Optional[float]:
     if value is None:
@@ -30,6 +36,10 @@ def _safe_number(value: Any) -> Optional[float]:
     if math.isnan(val) or math.isinf(val):
         return None
     return val
+
+
+LAST_DD_LOG: Dict[str, float] = {}
+
 
 def _log_report_metrics(payload: Dict[str, Any]) -> None:
     if not _debug_enabled():
@@ -47,19 +57,81 @@ SCHEMA_VERSION = 4
 
 
 class Reporter:
-    """Handles structured CSV logging for trading activity and diagnostics."""
+    """Consumes EquitySnapshot and maintains daily peak equity for drawdown metrics."""
 
-    def __init__(self, base_dir: str, environment: str, clock: Optional[Callable[[], datetime]] = None) -> None:
+    def __init__(
+        self,
+        base_dir: str,
+        environment: str,
+        clock: Optional[Callable[[], datetime]] = None,
+        *,
+        metrics: Optional[Any] = None,
+        logger_name: str = __name__,
+    ) -> None:
         self.base_dir = base_dir
         self.environment = environment
         self._clock = clock or datetime.now
+        self._metrics = metrics
+        self._logger = logging.getLogger(logger_name)
+        self._daily_peak_equity: Dict[str, float] = {}
+        self._last_dd_ratio: float = 0.0
 
     @classmethod
-    def from_config(cls) -> "Reporter":
+    def from_config(cls) -> Reporter:
         from config import DATA_BASE_DIR, TESTNET
 
         env = "testnet" if TESTNET else "live"
         return cls(DATA_BASE_DIR, env)
+
+    def apply_equity_snapshot(
+        self,
+        snap: EquitySnapshot,
+        *,
+        now_utc: Optional[datetime] = None,
+    ) -> float:
+        if now_utc is None:
+            now_utc = datetime.now(timezone.utc)
+        if now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=timezone.utc)
+        else:
+            now_utc = now_utc.astimezone(timezone.utc)
+
+        day_key = now_utc.strftime("%Y-%m-%d")
+        equity_dec = Decimal(str(snap.margin_balance))
+        peak_existing = self._daily_peak_equity.get(day_key)
+        peak_dec = equity_dec if peak_existing is None else max(Decimal(str(peak_existing)), equity_dec)
+        self._daily_peak_equity[day_key] = float(peak_dec)
+
+        eps = Decimal("1e-12")
+        denom = peak_dec if peak_dec > Decimal("0") else eps
+        dd_dec = (peak_dec - equity_dec) / denom
+        if dd_dec < Decimal("0"):
+            dd_dec = Decimal("0")
+        if dd_dec > Decimal("1"):
+            dd_dec = Decimal("1")
+
+        dd_ratio = float(dd_dec)
+        self._last_dd_ratio = dd_ratio
+
+        payload = {
+            "type": "DD_CALC",
+            "ts_utc": now_utc.isoformat().replace("+00:00", "Z"),
+            "equity": float(equity_dec),
+            "peak_equity": float(peak_dec),
+            "dd_ratio": dd_ratio,
+            "source": snap.source,
+            "account_mode": snap.account_mode,
+        }
+        self._logger.info(json.dumps(payload, sort_keys=True))
+
+        if self._metrics is not None:
+            self._metrics.update_daily_drawdown(dd_ratio, equity=float(equity_dec), ts=now_utc)
+
+        return dd_ratio
+
+    @property
+    def daily_peak_equity(self) -> Dict[str, float]:
+        return dict(self._daily_peak_equity)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -868,3 +940,39 @@ def save_report(df: pd.DataFrame, filepath: str) -> None:
     # Ensure parent directory exists
     os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
     df.to_excel(filepath, index=False)
+
+# Binance USDⓈ-M daily drawdown:
+#   wallet_balance := totalWalletBalance (cash)
+#   unrealized_pnl := totalUnrealizedProfit (signed)
+#   equity := margin_balance = wallet_balance + unrealized_pnl
+# Daily DD ratio = max(0, (peak - equity) / peak), peak tracked intraday.
+
+PEAK_STATE: Dict[str, Dict[str, float]] = {}
+
+
+def _reset_peak(account: str) -> None:
+    PEAK_STATE.pop(account, None)
+
+
+def _current_utc_day() -> str:
+    return datetime.utcnow().strftime('%Y-%m-%d')
+
+
+def apply_equity_snapshot(account: str, equity: Optional[float], *, now: Optional[float] = None) -> Optional[float]:
+    if equity is None or not math.isfinite(float(equity)) or equity <= 0:
+        return None
+    equity = float(equity)
+    ts = now if now is not None else time.time()
+    day = datetime.utcfromtimestamp(ts).strftime('%Y-%m-%d')
+    state = PEAK_STATE.setdefault(account, {"day": day, "peak": equity})
+    if state.get("day") != day or state.get("peak", 0.0) <= 0:
+        state["day"] = day
+        state["peak"] = equity
+    if equity > state["peak"]:
+        state["peak"] = equity
+    peak = state["peak"]
+    if peak <= 0:
+        return None
+    dd = max(0.0, (peak - equity) / peak)
+    dd = min(dd, 1.0)
+    return dd

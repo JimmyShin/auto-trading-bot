@@ -3,7 +3,13 @@
 Convenience exports for commonly used classes/functions.
 """
 
-from .exchange_api import ExchangeAPI, BalanceAuthError, BalanceSyncError  # noqa: F401
+from .exchange_api import (
+    ExchangeAPI,
+    BalanceAuthError,
+    BalanceSyncError,
+    EquitySnapshot,
+    EquitySnapshotError,
+)  # noqa: F401
 from .reporter import Reporter  # noqa: F401
 from .metrics import start_metrics_server, get_metrics_manager  # noqa: F401
 from .alerts import slack_notify_safely, slack_notify_exit, start_alert_scheduler  # noqa: F401

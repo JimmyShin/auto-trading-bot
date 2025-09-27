@@ -1,81 +1,81 @@
 from __future__ import annotations
 
+"""Exchange API helpers.
 
+Developer tip:
+    python -c "from auto_trading_bot.exchange_api import ExchangeAPI; print(ExchangeAPI().fetch_equity_snapshot())"
+logs a BAL_RAW line for inspection.
+"""
 
-import logging
-import os
 import json
-
+import logging
 import math
-
 import time
-
-
-
-from typing import Any, Dict, Iterable, List, Optional
-
-
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 from broker_binance import BinanceUSDM, BalanceAuthError, BalanceSyncError
 
-
-
-
-
 __all__ = [
-
     "ExchangeAPI",
-
     "BalanceAuthError",
-
     "BalanceSyncError",
-
+    "EquitySnapshot",
+    "EquitySnapshotError",
 ]
 
-
-
-
-
 logger = logging.getLogger(__name__)
-
-_DEBUG_VALUES = {"1", "true", "yes", "on"}
-
-def _debug_enabled() -> bool:
-    return os.getenv("OBS_DEBUG_ALERTS", "").strip().lower() in _DEBUG_VALUES
-
-def _log_equity_fetch(mode: str, equity: float) -> None:
-    if not _debug_enabled():
-        return
-    try:
-        import config as cfg
-        acct = getattr(cfg, "OBS_ACCOUNT_LABEL", "unknown")
-    except Exception:
-        acct = "unknown"
-    payload = {"acct": acct, "mode": mode, "equity": equity, "ts": time.time()}
-    try:
-        logger.info("EQUITY_FETCH %s", json.dumps(payload, sort_keys=True))
-    except Exception:
-        logger.info("EQUITY_FETCH %s", payload)
-
-
 
 
 POSITION_EPS = 1e-8
 
 
+class EquitySnapshotError(RuntimeError):
+    """Raised when snapshot cannot be obtained after retries."""
+
+
+@dataclass(frozen=True)
+class EquitySnapshot:
+    ts_utc: datetime
+    wallet_balance: float
+    margin_balance: float
+    unrealized_pnl: float
+    available_balance: float
+    source: str
+    account_mode: str
+
+
+def _decimal(value: Any) -> Decimal:
+    if value in (None, "", b"", False):
+        return Decimal("0")
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError) as exc:
+        raise EquitySnapshotError(f"Invalid numeric value: {value!r}") from exc
+
 
 class ExchangeAPI:
-
-    """Thin wrapper around the BinanceUSDM client to ease dependency injection."""
-
+    """Adapter around Binance USDⓈ-M futures; fetch_equity_snapshot feeds reporter/metrics/alerts."""
 
 
-    def __init__(self, client: Optional[BinanceUSDM] = None, auto_connect: bool = False) -> None:
 
+    def __init__(
+        self,
+        client: Optional[BinanceUSDM] = None,
+        auto_connect: bool = False,
+        *,
+        testnet: Optional[bool] = None,
+        source: Optional[str] = None,
+    ) -> None:
         self.client = client or BinanceUSDM()
-
+        if testnet is not None:
+            setattr(self.client, "testnet", bool(testnet))
+        self._explicit_source = source
         if auto_connect:
-
             self.connect()
 
 
@@ -116,11 +116,117 @@ class ExchangeAPI:
 
     # ------------------------------------------------------------------
 
+
+    def fetch_equity_snapshot(
+        self,
+        *,
+        retries: int = 3,
+        backoff_seconds: float = 0.5,
+    ) -> EquitySnapshot:
+        """Single source of truth for account equity on USDⓈ-M futures.
+
+        Uses Binance endpoints:
+          - /fapi/v2/balance  → wallet and available collateral
+          - /fapi/v2/account  → unrealized PnL and margin balance
+        """
+        if retries < 1:
+            raise ValueError("retries must be >= 1")
+
+        account_mode = "testnet" if getattr(self.client, "testnet", False) else "live"
+        source = (
+            self._explicit_source
+            if self._explicit_source is not None
+            else ("binance-usdm-testnet" if account_mode == "testnet" else "binance-usdm")
+        )
+
+        attempt = 0
+        while attempt < retries:
+            attempt += 1
+            try:
+                balance_payload = self._http_get("/fapi/v2/balance")
+                account_payload = self._http_get("/fapi/v2/account")
+                break
+            except Exception as exc:  # pragma: no cover - fallback message only
+                if attempt >= retries:
+                    message = "Unable to fetch USDⓈ-M equity snapshot"
+                    raise EquitySnapshotError(message) from exc
+                time.sleep(backoff_seconds * attempt)
+        else:  # pragma: no cover - loop should break or raise
+            raise EquitySnapshotError("Unable to fetch USDⓈ-M equity snapshot")
+
+        balances: Sequence[Any]
+        if isinstance(balance_payload, Sequence) and not isinstance(balance_payload, (str, bytes)):
+            balances = balance_payload
+        else:
+            raise EquitySnapshotError("Balance payload malformed")
+
+        if not isinstance(account_payload, dict):
+            raise EquitySnapshotError("Account payload malformed")
+        account = account_payload
+
+        wallet_balance = Decimal("0")
+        available_balance = Decimal("0")
+        for entry_any in balances:
+            entry = entry_any or {}
+            if entry.get("asset") != "USDT":
+                continue
+            wallet_balance += _decimal(entry.get("balance"))
+            available_balance += _decimal(entry.get("availableBalance"))
+
+        positions = account.get("positions")
+        positions_seq: Sequence[Any]
+        if isinstance(positions, Sequence) and not isinstance(positions, (str, bytes)):
+            positions_seq = positions
+        else:
+            positions_seq = []
+        unrealized_pnl = Decimal("0")
+        for pos_any in positions_seq:
+            pos = pos_any or {}
+            unrealized_pnl += _decimal(pos.get("unrealizedProfit"))
+
+        margin_balance = _decimal(account.get("totalMarginBalance"))
+
+        ts_utc = datetime.now(timezone.utc)
+        snapshot = EquitySnapshot(
+            ts_utc=ts_utc,
+            wallet_balance=float(wallet_balance),
+            margin_balance=float(margin_balance),
+            unrealized_pnl=float(unrealized_pnl),
+            available_balance=float(available_balance),
+            source=source,
+            account_mode=account_mode,
+        )
+
+        payload = {
+            "type": "BAL_RAW",
+            "ts_utc": ts_utc.isoformat().replace("+00:00", "Z"),
+            "wallet_balance": snapshot.wallet_balance,
+            "margin_balance": snapshot.margin_balance,
+            "unrealized_pnl": snapshot.unrealized_pnl,
+            "available_balance": snapshot.available_balance,
+            "source": snapshot.source,
+            "account_mode": snapshot.account_mode,
+        }
+        logger.info(json.dumps(payload, sort_keys=True))
+
+        return snapshot
+
+    def _http_get(self, path: str) -> Any:
+        if path == "/fapi/v2/balance":
+            return self._fetch_balances()
+        if path == "/fapi/v2/account":
+            return self._fetch_account()
+        raise EquitySnapshotError(f"Unsupported endpoint: {path}")
+
     def get_equity_usdt(self) -> float:
-        value = float(self.client.get_equity_usdt())
-        mode = "testnet" if getattr(self.client, "testnet", False) else "live"
-        _log_equity_fetch(mode, value)
-        return value
+        """DEPRECATED: use fetch_equity_snapshot(). Kept for backward compatibility.
+
+        Returns snapshot.margin_balance.
+        """
+        snapshot = self.fetch_equity_snapshot()
+        return snapshot.margin_balance
+
+
     def position_for(self, symbol: str) -> Dict[str, Any]:
 
         return self.client.position_for(symbol)
@@ -490,6 +596,37 @@ class ExchangeAPI:
         }
 
 
+
+    def _resolve_callable(self, names: Iterable[str]) -> Optional[Callable[[], Any]]:
+        for name in names:
+            attr = getattr(self.client, name, None)
+            if callable(attr):
+                return attr
+        exchange = getattr(self.client, "exchange", None)
+        if exchange is not None:
+            for name in names:
+                attr = getattr(exchange, name, None)
+                if callable(attr):
+                    return attr
+        return None
+
+    def _fetch_balances(self) -> List[Dict[str, Any]]:
+        func = self._resolve_callable(("fapiPrivateGetBalance", "fapi_private_get_balance"))
+        if func is None:
+            raise EquitySnapshotError("Client does not expose a USDⓈ-M balance endpoint")
+        result = func()
+        if isinstance(result, Sequence):
+            return list(result)  # type: ignore[list-item]
+        raise EquitySnapshotError("Balance endpoint returned unexpected payload")
+
+    def _fetch_account(self) -> Dict[str, Any]:
+        func = self._resolve_callable(("fapiPrivateGetAccount", "fapi_private_get_account"))
+        if func is None:
+            raise EquitySnapshotError("Client does not expose a USDⓈ-M account endpoint")
+        result = func()
+        if isinstance(result, dict):
+            return result
+        raise EquitySnapshotError("Account endpoint returned unexpected payload")
 
     def fetch_my_trades(self, symbol: str, limit: int = 5):
 

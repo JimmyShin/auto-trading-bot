@@ -348,6 +348,48 @@ def emergency_close_all(confirm: bool = False) -> dict:
 
 
 if __name__ == "__main__":
-    # FastMCP uses stdio transport by default
-    app.run()
+    import traceback, time, asyncio
+    try:
+        print("DEBUG: ROOT =", ROOT)
+        import sys
+        print("DEBUG: sys.path[0] =", sys.path[0])
+
+        # app.list_tools() is async -> run it synchronously here to inspect actual tools
+        try:
+            coro = None
+            if hasattr(app, "list_tools"):
+                coro = app.list_tools()
+            elif hasattr(app, "_tool_manager"):
+                # fallback: try to access internal tool manager sync info later
+                pass
+
+            if coro is not None:
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    tools_list = loop.run_until_complete(coro)
+                    print("DEBUG: app.list_tools() ->", tools_list)
+                finally:
+                    try:
+                        loop.close()
+                    except Exception:
+                        pass
+            else:
+                print("DEBUG: no app.list_tools coroutine available; attempting alternate introspect")
+                tm = getattr(app, "_tool_manager", getattr(app, "tools", None))
+                print("DEBUG: tool manager object type:", type(tm))
+        except Exception as e:
+            print("DEBUG: exception while enumerating tools:", e)
+            traceback.print_exc()
+
+        print("DEBUG: starting FastMCP app.run(); waiting for client (stdio)")
+        app.run()
+    except KeyboardInterrupt:
+        print("DEBUG: KeyboardInterrupt received; shutting down cleanly")
+    except Exception as e:
+        print("DEBUG: unexpected error in __main__:", e)
+        traceback.print_exc()
+    finally:
+        time.sleep(0.05)
+        print("DEBUG: exiting")
 

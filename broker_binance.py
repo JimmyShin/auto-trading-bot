@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional
 
+import time
+
 
 class BalanceAuthError(Exception):
     """Raised when the exchange rejects the API credentials."""
@@ -42,7 +44,8 @@ class BinanceUSDM:
         self.api_key = api_key
         self.api_secret = api_secret
         self.testnet = bool(testnet)
-        self._equity = 10_000.0
+        self._wallet_balance = 10_000.0
+        self._unrealized = 0.0
         self._positions: Dict[str, Dict[str, Any]] = {}
         self._prices: Dict[str, float] = {}
         self.exchange = _MockExchange(self)
@@ -77,14 +80,28 @@ class BinanceUSDM:
     # Account state API (mirrors methods used by ExchangeAPI)
     # ------------------------------------------------------------------
     def get_equity_usdt(self) -> float:
-        return float(self._equity)
+        return float(self._wallet_balance + self._unrealized)
 
     # Convenience aliases required by the prompt
     def get_equity(self) -> float:
         return self.get_equity_usdt()
 
     def set_equity(self, equity: float) -> None:
-        self._equity = float(equity)
+        self._wallet_balance = float(equity)
+        self._unrealized = 0.0
+
+    def set_balance(self, wallet_balance: float, unrealized: float) -> None:
+        self._wallet_balance = float(wallet_balance)
+        self._unrealized = float(unrealized)
+
+    def get_balance_snapshot(self) -> Dict[str, Any]:
+        equity = self.get_equity_usdt()
+        return {
+            "totalWalletBalance": float(self._wallet_balance),
+            "totalUnrealizedProfit": float(self._unrealized),
+            "totalMarginBalance": float(equity),
+            "updateTime": int(time.time() * 1000),
+        }
 
     def position_for(self, symbol: str) -> Dict[str, Any]:
         return dict(self._positions.get(symbol, {}))
