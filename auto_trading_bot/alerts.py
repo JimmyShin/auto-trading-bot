@@ -24,7 +24,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple
 
 import requests
@@ -1030,6 +1030,134 @@ def _debug_dump() -> None:
         print(json.dumps(snapshot, indent=2, default=_safe_json_value))
     except Exception:
         print(snapshot)
+
+
+RUNBOOK_HEADER = (
+    "[RUNBOOK] If this alert fires, review BAL_RAW/DD_CALC logs and metrics.\n"
+    "To simulate locally:\n"
+    "curl -s http://localhost:9000/health\n"
+    "# or run a dry-run check:\n"
+    "python -m auto_trading_bot.cli check --now"
+)
+
+
+class Alerts:
+    """Alerting and instrumentation layer handling heartbeat, guardrails, and inputs."""
+
+    def __init__(
+        self,
+        metrics,
+        *,
+        logger_name: str = __name__,
+        heartbeat_interval_sec: int = 60,
+        dd_guard_threshold: float = 0.20,
+        dedupe_window_sec: int = 300,
+        guard_action: Optional[Callable[[float], None]] = None,
+        source: str = "binance-usdm-testnet",
+        account_mode: str = "testnet",
+    ) -> None:
+        self._metrics = metrics
+        self._logger = logging.getLogger(logger_name)
+        self._hb_interval = max(1, int(heartbeat_interval_sec))
+        self._dd_threshold = max(0.0, float(dd_guard_threshold))
+        self._dedupe_window = max(1, int(dedupe_window_sec))
+        self._guard_action = guard_action
+        self._source = source
+        self._account_mode = account_mode
+
+        self._last_heartbeat_ts: Optional[float] = None
+        self._last_alert_by_key: Dict[str, float] = {}
+
+    def _now_utc(self, now_utc: Optional[datetime]) -> datetime:
+        if now_utc is None:
+            return datetime.now(timezone.utc)
+        if now_utc.tzinfo is None:
+            return now_utc.replace(tzinfo=timezone.utc)
+        return now_utc.astimezone(timezone.utc)
+
+    def _dd_ratio(self) -> float:
+        try:
+            ratio = float(self._metrics.bot_daily_drawdown())
+        except Exception:
+            ratio = 0.0
+        if ratio < 0.0:
+            return 0.0
+        if ratio > 1.0:
+            return 1.0
+        return ratio
+
+    def _should_emit(self, key: str, *, now_ts: float) -> bool:
+        last = self._last_alert_by_key.get(key)
+        if last is None or (now_ts - last) >= self._dedupe_window:
+            self._last_alert_by_key[key] = now_ts
+            return True
+        return False
+
+    def maybe_emit_heartbeat(self, *, now_utc: Optional[datetime] = None) -> bool:
+        now = self._now_utc(now_utc)
+        now_ts = now.timestamp()
+        last = self._last_heartbeat_ts
+        if last is not None and (now_ts - last) < self._hb_interval:
+            return False
+
+        dd_ratio = self._dd_ratio()
+        payload = {
+            "type": "HEARTBEAT",
+            "ts_utc": now.isoformat().replace("+00:00", "Z"),
+            "dd_ratio": dd_ratio,
+            "account_mode": self._account_mode,
+            "source": self._source,
+        }
+        self._logger.info(json.dumps(payload, sort_keys=True))
+        self._last_heartbeat_ts = now_ts
+        return True
+
+    def evaluate(
+        self,
+        *,
+        equity: Optional[float] = None,
+        peak_equity: Optional[float] = None,
+        now_utc: Optional[datetime] = None,
+    ) -> None:
+        now = self._now_utc(now_utc)
+        dd_ratio = self._dd_ratio()
+
+        payload_input = {
+            "type": "ALERTS_INPUT",
+            "ts_utc": now.isoformat().replace("+00:00", "Z"),
+            "dd_ratio": dd_ratio,
+            "equity": float(equity) if equity is not None else None,
+            "peak_equity": float(peak_equity) if peak_equity is not None else None,
+            "account_mode": self._account_mode,
+            "source": self._source,
+        }
+        self._logger.info(json.dumps(payload_input, sort_keys=True, default=_safe_json_value))
+
+        if dd_ratio < self._dd_threshold:
+            return
+
+        key = f"AUTO_TESTNET_ON_DD:{self._account_mode}:{round(self._dd_threshold, 4)}"
+        now_ts = now.timestamp()
+        if not self._should_emit(key, now_ts=now_ts):
+            return
+
+        payload_guard = {
+            "type": "GUARDRAIL_TRIP",
+            "ts_utc": now.isoformat().replace("+00:00", "Z"),
+            "guard": "AUTO_TESTNET_ON_DD",
+            "dd_ratio": dd_ratio,
+            "threshold": float(self._dd_threshold),
+            "account_mode": self._account_mode,
+            "source": self._source,
+        }
+        self._logger.info(json.dumps(payload_guard, sort_keys=True, default=_safe_json_value))
+        self._logger.info(RUNBOOK_HEADER)
+
+        if self._guard_action is not None:
+            try:
+                self._guard_action(dd_ratio)
+            except Exception as exc:
+                self._logger.warning("guard_action failed: %s", exc)
 
 
 if __name__ == "__main__":
