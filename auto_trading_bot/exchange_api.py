@@ -425,15 +425,13 @@ class ExchangeAPI:
 
             attempts += 1
 
-
-
             try:
 
-                self.cancel_all(symbol)
+                self.cancel_reduce_only_stop_orders(symbol)
 
             except Exception as exc:
 
-                logger.debug("Cancel all failed for %s: %s", symbol, exc)
+                logger.debug("Cancel reduce-only stops failed for %s: %s", symbol, exc)
 
 
 

@@ -124,51 +124,32 @@ def place_tp_ladder(
     min_notional = float(precision.get('min_notional') or precision.get('minNotional') or 0)
     exit_side = 'sell' if (side or '').lower() != 'short' else 'buy'
 
+    placed_any = False
     for idx, level in enumerate(levels, start=1):
         raw_px = float(level.get('px') or 0)
         raw_qty = float(level.get('qty') or 0)
         px = align_price(raw_px, tick_size)
         qty = align_qty(raw_qty, step_size)
+        payload_base = {
+            'symbol': symbol,
+            'side': exit_side.upper(),
+            'level': idx,
+            'price': float(px),
+            'qty': float(qty),
+        }
         if qty <= 0:
-            payload = {
-                'type': 'TP_SKIP',
-                'reason': 'zero_qty',
-                'symbol': symbol,
-                'side': exit_side.upper(),
-                'level': idx,
-            }
+            payload = {'type': 'TP_SKIP', 'reason': 'zero_qty', **payload_base}
             logger.info(json.dumps(payload, sort_keys=True))
             continue
         if px <= 0:
-            payload = {
-                'type': 'TP_SKIP',
-                'reason': 'precision',
-                'symbol': symbol,
-                'side': exit_side.upper(),
-                'level': idx,
-            }
+            payload = {'type': 'TP_SKIP', 'reason': 'precision', **payload_base}
             logger.info(json.dumps(payload, sort_keys=True))
             continue
         if min_notional > 0 and qty * px < min_notional:
-            payload = {
-                'type': 'TP_SKIP',
-                'reason': 'minNotional',
-                'symbol': symbol,
-                'side': exit_side.upper(),
-                'price': px,
-                'qty': qty,
-                'level': idx,
-            }
+            payload = {'type': 'TP_SKIP', 'reason': 'minNotional', **payload_base}
             logger.info(json.dumps(payload, sort_keys=True))
             continue
-        payload = {
-            'type': 'TP_PLACE',
-            'symbol': symbol,
-            'side': exit_side.upper(),
-            'price': px,
-            'qty': qty,
-            'level': idx,
-        }
+        payload = {'type': 'TP_PLACE', **payload_base}
         try:
             b.create_limit_order(
                 symbol,
@@ -179,11 +160,12 @@ def place_tp_ladder(
                 time_in_force='GTC',
             )
             logger.info(json.dumps(payload, sort_keys=True))
+            placed_any = True
         except Exception as exc:
-            payload['type'] = 'TP_SKIP'
-            payload['reason'] = 'order_error'
-            payload['error'] = str(exc)
-            logger.warning(json.dumps(payload, sort_keys=True))
+            payload_err = {'type': 'TP_SKIP', 'reason': 'order_error', 'error': str(exc), **payload_base}
+            logger.warning(json.dumps(payload_err, sort_keys=True))
+    if not placed_any:
+        logger.warning(json.dumps({'type': 'TP_WARN', 'symbol': symbol, 'side': exit_side.upper(), 'reason': 'all_skipped'}, sort_keys=True))
 
 
 def _ensure_protective_stop_on_restart(b: ExchangeAPI, eng: DonchianATREngine, symbol: str) -> bool:
