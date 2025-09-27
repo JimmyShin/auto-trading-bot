@@ -34,6 +34,7 @@ import math
 
 import pytest
 
+from auto_trading_bot import slack_notifier
 import config
 import auto_trading_bot.alerts as alerts
 
@@ -72,16 +73,36 @@ def test_slack_notify_success(monkeypatch):
         payload["headers"] = headers
         return DummyResp(200)
 
-    monkeypatch.setattr(alerts.requests, "post", fake_post)
+    monkeypatch.setenv("SLACK_DRY_RUN", "false")
 
-    ok = alerts.slack_notify_safely(
-        "hello",
-        blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": "hello"}}],
-    )
+    class DummyRequest:
+        def __init__(self, url, data=None, headers=None):
+            payload["url"] = url
+            payload["data"] = data
+            payload["headers"] = headers
+
+    class DummyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def read(self):
+            return b""
+
+    def fake_urlopen(req, timeout=None):
+        return DummyResponse()
+
+    monkeypatch.setattr(slack_notifier.urllib.request, "Request", DummyRequest)
+    monkeypatch.setattr(slack_notifier.urllib.request, "urlopen", fake_urlopen)
+
+    ok = slack_notifier.SlackNotifier(logger_name="test").send("hello", blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": "hello"}}])
     assert ok is True
     assert payload["url"] == "https://example.com/hook"
-    assert payload["json"]["text"] == "hello"
-    assert payload["json"]["blocks"][0]["type"] == "section"
+    body = json.loads(payload["data"].decode("utf-8"))
+    assert body["text"] == "hello"
+    assert body["blocks"][0]["type"] == "section"
 
 
 def test_slack_notify_failure(monkeypatch):

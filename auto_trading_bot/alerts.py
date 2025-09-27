@@ -1128,6 +1128,7 @@ class Alerts:
             f"mode={self._account_mode} | source={self._source}"
         )
         message = f"{RUNBOOK_HEADER}\n\n{body}"
+        self._logger.info(message)
         notifier = _get_notifier()
         notifier.send_markdown(message)
 

@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import urllib.request
+from typing import Any, Dict, Optional
 
 
 class SlackNotifier:
@@ -15,17 +16,30 @@ class SlackNotifier:
         dry_env = os.environ.get("SLACK_DRY_RUN", "false").strip().lower()
         self._dry = dry_env == "true" or not self._url
 
-    def send_markdown(self, text: str) -> None:
-        payload = {"text": text}
+    def _dispatch(self, payload: Dict[str, Any]) -> bool:
         if self._dry:
             self._logger.info(json.dumps({"type": "SLACK_DRY_RUN", "payload": payload}, sort_keys=True))
-            return
+            return True
+        try:
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                self._url,
+                data=data,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                resp.read()
+            return True
+        except Exception as exc:  # pragma: no cover - network failure surfaces in logs
+            self._logger.warning("Slack webhook failed: %s", exc)
+            return False
 
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            self._url,
-            data=data,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            resp.read()
+    def send_markdown(self, text: str) -> bool:
+        payload = {"text": text}
+        return self._dispatch(payload)
+
+    def send(self, text: str, *, blocks: Optional[list] = None) -> bool:
+        if blocks:
+            payload: Dict[str, Any] = {"text": text, "blocks": blocks}
+            return self._dispatch(payload)
+        return self.send_markdown(text)

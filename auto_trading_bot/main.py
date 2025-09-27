@@ -222,6 +222,9 @@ class EmergencyManager:
         self.block_entries_until: Optional[datetime] = None
         self.auto_testnet_armed = False
         self.kill_switch_triggered = False
+        self.metrics: Optional[Any] = None
+        self.reporter: Optional[Reporter] = None
+        self.alerts: Optional[Alerts] = None
 
     def _next_utc_midnight(self, now: datetime) -> datetime:
         if now.tzinfo is None:
@@ -251,7 +254,10 @@ class EmergencyManager:
             self.auto_testnet_armed = True
             self.block_entries_until = self._next_utc_midnight(now)
             self.exchange.set_testnet(True)
-            self.alerts.evaluate(equity=None, peak_equity=None, now_utc=now)
+            message = "[EMERGENCY] AUTO_TESTNET_ON_DD triggered → switched to testnet, live entries disabled until UTC reset."
+            self.notify(message)
+            if self.alerts is not None:
+                self.alerts.evaluate(equity=None, peak_equity=None, now_utc=now)
             return True
         return False
 
