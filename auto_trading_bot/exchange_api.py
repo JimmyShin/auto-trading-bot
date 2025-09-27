@@ -252,10 +252,12 @@ class ExchangeAPI:
     # ------------------------------------------------------------------
 
     def cancel_all(self, symbol: str) -> None:
-
         self.client.cancel_all(symbol)
 
-
+    def cancel_reduce_only_stop_orders(self, symbol: str) -> None:
+        cancel_fn = getattr(self.client, "cancel_reduce_only_stop_orders", None)
+        if callable(cancel_fn):
+            cancel_fn(symbol)
 
     def create_market_order_safe(self, symbol: str, side: str, qty: float) -> Dict[str, Any]:
 

@@ -6,10 +6,11 @@ import signal
 import atexit
 import logging
 import math
+import json
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone, timedelta
 from threading import Lock
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 
@@ -63,6 +64,128 @@ eng_global = None
 lock = Lock()
 
 
+def align_price(price: float, tick_size: float) -> float:
+    if tick_size <= 0:
+        return float(price)
+    return math.floor(price / tick_size) * tick_size
+
+
+def align_qty(qty: float, step_size: float) -> float:
+    if step_size <= 0:
+        return float(qty)
+    return math.floor(qty / step_size) * step_size
+
+
+def compute_tp_ladder(entry_px: float, side: str, base_qty: float) -> List[Dict[str, float]]:
+    side = (side or "").lower()
+    if base_qty <= 0 or entry_px <= 0:
+        return []
+    pct_offsets = [0.006, 0.012, 0.018]
+    qty_splits = [0.40, 0.35, 0.25]
+    levels: List[Dict[str, float]] = []
+    for idx, (pct, split) in enumerate(zip(pct_offsets, qty_splits), start=1):
+        qty = base_qty * split
+        if side == "short":
+            target = entry_px * (1 - pct)
+        else:
+            target = entry_px * (1 + pct)
+        levels.append({"px": target, "qty": qty, "level": idx})
+    return levels
+
+
+def _replace_stop_only(b: ExchangeAPI, symbol: str, position_side: str, stop_price: float, qty: float) -> None:
+    if qty <= 0 or stop_price <= 0:
+        return
+    exit_side = 'sell' if (position_side or '').lower() == 'long' else 'buy'
+    try:
+        cancel_fn = getattr(b, 'cancel_reduce_only_stop_orders', None)
+        if callable(cancel_fn):
+            cancel_fn(symbol)
+    except Exception:
+        pass
+    b.create_stop_market_safe(symbol, exit_side, float(stop_price), float(qty), reduce_only=True)
+
+
+def place_tp_ladder(
+    b: ExchangeAPI,
+    symbol: str,
+    side: str,
+    base_qty: float,
+    entry_px: float,
+    levels: List[Dict[str, float]],
+    precision: Optional[Dict[str, float]] = None,
+) -> None:
+    if base_qty <= 0 or entry_px <= 0 or not levels:
+        return
+
+    precision = precision or {}
+    tick_size = float(precision.get('tick_size') or precision.get('tickSize') or 0)
+    step_size = float(precision.get('step_size') or precision.get('stepSize') or 0)
+    min_notional = float(precision.get('min_notional') or precision.get('minNotional') or 0)
+    exit_side = 'sell' if (side or '').lower() != 'short' else 'buy'
+
+    for idx, level in enumerate(levels, start=1):
+        raw_px = float(level.get('px') or 0)
+        raw_qty = float(level.get('qty') or 0)
+        px = align_price(raw_px, tick_size)
+        qty = align_qty(raw_qty, step_size)
+        if qty <= 0:
+            payload = {
+                'type': 'TP_SKIP',
+                'reason': 'zero_qty',
+                'symbol': symbol,
+                'side': exit_side.upper(),
+                'level': idx,
+            }
+            logger.info(json.dumps(payload, sort_keys=True))
+            continue
+        if px <= 0:
+            payload = {
+                'type': 'TP_SKIP',
+                'reason': 'precision',
+                'symbol': symbol,
+                'side': exit_side.upper(),
+                'level': idx,
+            }
+            logger.info(json.dumps(payload, sort_keys=True))
+            continue
+        if min_notional > 0 and qty * px < min_notional:
+            payload = {
+                'type': 'TP_SKIP',
+                'reason': 'minNotional',
+                'symbol': symbol,
+                'side': exit_side.upper(),
+                'price': px,
+                'qty': qty,
+                'level': idx,
+            }
+            logger.info(json.dumps(payload, sort_keys=True))
+            continue
+        payload = {
+            'type': 'TP_PLACE',
+            'symbol': symbol,
+            'side': exit_side.upper(),
+            'price': px,
+            'qty': qty,
+            'level': idx,
+        }
+        try:
+            b.create_limit_order(
+                symbol,
+                exit_side,
+                px,
+                qty,
+                reduce_only=True,
+                time_in_force='GTC',
+            )
+            logger.info(json.dumps(payload, sort_keys=True))
+        except Exception as exc:
+            payload['type'] = 'TP_SKIP'
+            payload['reason'] = 'order_error'
+            payload['error'] = str(exc)
+            logger.warning(json.dumps(payload, sort_keys=True))
+
+
 def _ensure_protective_stop_on_restart(b: ExchangeAPI, eng: DonchianATREngine, symbol: str) -> bool:
     """Ensure a reduceOnly protective stop exists for an open position.
 
@@ -103,11 +226,7 @@ def _ensure_protective_stop_on_restart(b: ExchangeAPI, eng: DonchianATREngine, s
                 pass
         if not stop_price:
             return False
-        b.cancel_all(symbol)
-        if side_label == 'long':
-            b.create_stop_market_safe(symbol, 'sell', float(stop_price), amt, reduce_only=True)
-        else:
-            b.create_stop_market_safe(symbol, 'buy', float(stop_price), amt, reduce_only=True)
+        _replace_stop_only(b, symbol, side_label or 'long', float(stop_price), amt)
         # Persist the last known protective stop for visibility after restart
         try:
             st = eng.state.get(symbol, {}) if eng else {}
@@ -700,6 +819,13 @@ def main():
 
             for symbol in UNIVERSE:
                 try:
+                    precision_fn = getattr(b, 'market_precision', None)
+                    if callable(precision_fn):
+                        try:
+                            precision_info = precision_fn(symbol) or {}
+                        except Exception:
+                            precision_info = {}
+
                     df = fetch_df(b, symbol, TF, LOOKBACK)
                     if len(df) < max(ATR_LEN, 25):
                         continue
@@ -768,12 +894,9 @@ def main():
                         be = bool((st or {}).get('be_promoted', False))
                         new_trail = eng.trail_stop_price(side, entry_px, close, atr_abs, be)
                         try:
-                            b.cancel_all(symbol)
                             amt = abs(float(pos.get('contracts') or pos.get('positionAmt') or 0))
-                            if side == 'long':
-                                b.create_stop_market_safe(symbol, 'sell', new_trail, amt, reduce_only=True)
-                            else:
-                                b.create_stop_market_safe(symbol, 'buy', new_trail, amt, reduce_only=True)
+                            if amt > 0:
+                                _replace_stop_only(b, symbol, side, new_trail, amt)
                         except Exception:
                             pass
 
@@ -814,16 +937,22 @@ def main():
                                             except Exception:
                                                 pass
                                             print(f"[ADD] {symbol} level={pyr_level} qty={eff_add:.6f} px={close:.4f}")
+                                            levels_add = compute_tp_ladder(close, side, eff_add)
+                                            place_tp_ladder(
+                                                b,
+                                                symbol,
+                                                side,
+                                                eff_add,
+                                                close,
+                                                levels_add,
+                                                precision_info,
+                                            )
                                             # After adding, refresh protective stop for total amount
                                             try:
                                                 pos2 = b.position_for(symbol)
                                                 amt2 = abs(float(pos2.get('contracts') or pos2.get('positionAmt') or 0)) if pos2 else 0.0
                                                 if amt2 > 0:
-                                                    b.cancel_all(symbol)
-                                                    if side == 'long':
-                                                        b.create_stop_market_safe(symbol, 'sell', new_trail, amt2, reduce_only=True)
-                                                    else:
-                                                        b.create_stop_market_safe(symbol, 'buy', new_trail, amt2, reduce_only=True)
+                                                    _replace_stop_only(b, symbol, side, new_trail, amt2)
                                             except Exception:
                                                 pass
                                         except Exception as _pe:
@@ -846,80 +975,36 @@ def main():
                         if qty <= 0 or stop_price <= 0:
                             continue
                         try:
-                            b.cancel_all(symbol)
                             order = b.create_market_order_safe(symbol, side_order, qty)
                             eff_qty = float(order.get('amount', qty) or qty)
                             if side_order == 'buy':
-                                b.create_stop_market_safe(symbol, 'sell', stop_price, eff_qty, reduce_only=True)
+                                _replace_stop_only(b, symbol, 'long', stop_price, eff_qty)
                                 risk_usdt = abs(close - stop_price) * eff_qty
                                 eng.update_symbol_state_on_entry(symbol, 'long', close, eff_qty, entry_stop_price=stop_price, risk_usdt=risk_usdt)
-                                # Snapshot risk basis at entry
-                                try:
-                                    from config import ATR_LEN as _ATR_LEN, ATR_STOP_K as _STOP_K
-                                except Exception:
-                                    _ATR_LEN, _STOP_K = 14, 1.2
-                                fallback_pct = 0.004
-                                atr_stop = _STOP_K * float(atr_abs)
-                                pct_stop = fallback_pct * float(close)
-                                stop_basis = 'atr' if atr_stop >= pct_stop else 'percent'
-                                stop_distance = max(atr_stop, pct_stop)
-                                log_trade(
+                                levels = compute_tp_ladder(close, 'long', eff_qty)
+                                place_tp_ladder(
+                                    b,
                                     symbol,
-                                    'LONG',
-                                    close,
+                                    'long',
                                     eff_qty,
-                                    'MA_CROSS',
-                                    risk_usdt=risk_usdt,
-                                    timeframe=TF,
-                                    leverage=LEVERAGE,
-                                    entry_atr_abs=float(atr_abs),
-                                    atr_period=int(_ATR_LEN),
-                                    atr_source='hlc3',
-                                    stop_basis=stop_basis,
-                                    stop_k=float(_STOP_K),
-                                    fallback_pct=float(fallback_pct),
-                                    stop_distance=float(stop_distance),
-                                    risk_usdt_planned=float(stop_distance) * float(eff_qty),
+                                    close,
+                                    levels,
+                                    precision_info,
                                 )
-                                try:
-                                    log_detailed_entry(symbol, 'LONG', close, eff_qty, stop_price, plan.get('risk_multiplier', 1.0), atr_abs, plan.get('signal', {}), eq, 'MA_ALIGNMENT', plan.get('reasons'))
-                                except Exception:
-                                    pass
                             else:
-                                b.create_stop_market_safe(symbol, 'buy', stop_price, eff_qty, reduce_only=True)
+                                _replace_stop_only(b, symbol, 'short', stop_price, eff_qty)
                                 risk_usdt = abs(stop_price - close) * eff_qty
                                 eng.update_symbol_state_on_entry(symbol, 'short', close, eff_qty, entry_stop_price=stop_price, risk_usdt=risk_usdt)
-                                try:
-                                    from config import ATR_LEN as _ATR_LEN, ATR_STOP_K as _STOP_K
-                                except Exception:
-                                    _ATR_LEN, _STOP_K = 14, 1.2
-                                    fallback_pct = 0.004
-                                    atr_stop = _STOP_K * float(atr_abs)
-                                    pct_stop = fallback_pct * float(close)
-                                    stop_basis = 'atr' if atr_stop >= pct_stop else 'percent'
-                                    stop_distance = max(atr_stop, pct_stop)
-                                    log_trade(
-                                        symbol,
-                                        'SHORT',
-                                        close,
-                                        eff_qty,
-                                        'MA_CROSS',
-                                        risk_usdt=risk_usdt,
-                                        timeframe=TF,
-                                        leverage=LEVERAGE,
-                                        entry_atr_abs=float(atr_abs),
-                                        atr_period=int(_ATR_LEN),
-                                        atr_source='hlc3',
-                                        stop_basis=stop_basis,
-                                        stop_k=float(_STOP_K),
-                                        fallback_pct=float(fallback_pct),
-                                        stop_distance=float(stop_distance),
-                                        risk_usdt_planned=float(stop_distance) * float(eff_qty),
-                                    )
-                                try:
-                                    log_detailed_entry(symbol, 'SHORT', close, eff_qty, stop_price, plan.get('risk_multiplier', 1.0), atr_abs, plan.get('signal', {}), eq, 'MA_ALIGNMENT', plan.get('reasons'))
-                                except Exception:
-                                    pass
+                                levels = compute_tp_ladder(close, 'short', eff_qty)
+                                place_tp_ladder(
+                                    b,
+                                    symbol,
+                                    'short',
+                                    eff_qty,
+                                    close,
+                                    levels,
+                                    precision_info,
+                                )
                             print(f"[ENTRY] {symbol} {decision} qty={eff_qty:.6f} px={close:.4f} stop={stop_price:.4f}")
                         except Exception as e:
                             try:
