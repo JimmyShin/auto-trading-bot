@@ -53,6 +53,14 @@ BINANCE_SECRET = os.getenv("BINANCE_SECRET", "")
 TESTNET = os.getenv("TESTNET", "True").lower() == "true"
 
 
+def get_trading_mode() -> str:
+    try:
+        from auto_trading_bot.mode import TradingMode
+    except Exception:
+        return "testnet" if TESTNET else "live"
+    return TradingMode.TESTNET.value if TESTNET else TradingMode.LIVE.value
+
+
 
 # Restart behavior
 
@@ -125,6 +133,7 @@ ATR_TRAIL_K = 2.5
 DAILY_LOSS_LIMIT = 0.06  # 6% daily loss
 
 DAILY_DD_LIMIT = float(os.getenv("DAILY_DD_LIMIT", "0.05"))
+AUTO_TESTNET_ON_DD_THRESHOLD = float(os.getenv("AUTO_TESTNET_ON_DD_THRESHOLD", "0.25"))
 
 FUNDING_AVOID_MIN = 5    # avoid entries/adds 5 minutes pre-funding
 
@@ -139,6 +148,7 @@ TF = "1h"
 LOOKBACK = 400
 
 STATE_FILE = "state.json"
+STATE_STORE_PATH = os.getenv("STATE_STORE_PATH", STATE_FILE)
 
 
 

@@ -3,15 +3,24 @@
 Convenience exports for commonly used classes/functions.
 """
 
-from .exchange_api import (
-    ExchangeAPI,
-    BalanceAuthError,
-    BalanceSyncError,
-    EquitySnapshot,
-    EquitySnapshotError,
-)  # noqa: F401
-from .reporter import Reporter  # noqa: F401
-from .metrics import start_metrics_server, get_metrics_manager  # noqa: F401
-from .alerts import slack_notify_safely, slack_notify_exit, start_alert_scheduler  # noqa: F401
-from .main import EmergencyManager, startup_sync, emergency_cleanup  # noqa: F401
+__all__: list[str] = []
+
+
+def __getattr__(name: str):
+    if name in ("start_metrics_server", "get_metrics_manager"):
+        from .metrics import start_metrics_server, get_metrics_manager
+
+        return {
+            "start_metrics_server": start_metrics_server,
+            "get_metrics_manager": get_metrics_manager,
+        }[name]
+    if name == "Alerts":
+        from .alerts import Alerts
+
+        return Alerts
+    if name == "EmergencyManager":
+        from .main import EmergencyManager
+
+        return EmergencyManager
+    raise AttributeError(f"module 'auto_trading_bot' has no attribute {name!r}")
 

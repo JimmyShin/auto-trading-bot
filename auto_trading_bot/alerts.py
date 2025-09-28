@@ -29,8 +29,13 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple
 
 import requests
 
-from auto_trading_bot.metrics import get_metrics_manager
+from auto_trading_bot.metrics import get_metrics_manager, compute_daily_dd_ratio, get_state
 from auto_trading_bot.slack_notifier import SlackNotifier
+from auto_trading_bot.slack_fmt import fmt_optional, fmt_currency, fmt_percent_ratio, fmt_int, fmt_float2, DASH
+from auto_trading_bot.metrics import compute_daily_dd_ratio
+from auto_trading_bot.mode import TradingMode
+import config
+from auto_trading_bot.state_store import StateStore
 
 logger = logging.getLogger(__name__)
 
@@ -616,6 +621,7 @@ class AlertScheduler(threading.Thread):
         *,
         interval_sec: float = 60.0,
         now_fn: Optional[Callable[[], float]] = None,
+        guard_action: Optional[Callable[[float], None]] = None,
     ) -> None:
         super().__init__(name="alert-scheduler", daemon=True)
         self.metrics = metrics_manager
@@ -631,6 +637,7 @@ class AlertScheduler(threading.Thread):
         self.activity_history: Deque[Tuple[float, float, Optional[float]]] = deque()
         self._prev_error_totals: Dict[str, float] = {}
         self._equity_warned = False
+        self._guard_action = guard_action
 
     # Thread loop ---------------------------------------------------------
     def run(self) -> None:  # pragma: no cover - exercised in integration
@@ -702,20 +709,21 @@ class AlertScheduler(threading.Thread):
 
         equity_value = _safe_number(snap.get("equity"))
         if not equity_value or equity_value <= 0:
-            equity_text = "NA"
+            equity_text = DASH
             if not self._equity_warned:
                 logger.warning("Heartbeat equity unavailable; awaiting metrics update before displaying equity.")
                 self._equity_warned = True
         else:
-            equity_text = f"{equity_value:.2f}"
+            equity_text = fmt_currency(equity_value)
             self._equity_warned = False
 
-        avg_r_text = _format_decimal(snap.get("avg_r"), digits=2)
+        avg_r_value = _safe_number(snap.get("avg_r"))
+        avg_r_text = fmt_optional(avg_r_value, fmt_float2)
 
         trade_total_raw = snap.get("trade_total")
         trade_total_val: Optional[float] = None
         trade_delta_value: Optional[float] = None
-        trade_delta_text = "NA"
+        trade_delta_text = DASH
         if trade_total_raw is not None:
             try:
                 trade_total_val = float(trade_total_raw)
@@ -723,55 +731,54 @@ class AlertScheduler(threading.Thread):
                 trade_delta_value = trade_total_val - baseline
                 if trade_delta_value < 0:
                     trade_delta_value = 0.0
-                trade_delta_text = _format_int(trade_delta_value, fallback="0")
+                trade_delta_text = fmt_int(trade_delta_value)
             except (TypeError, ValueError):
                 trade_total_val = None
 
         drift_val = (snap.get("time_drift") or {}).get("exchange")
-        drift_text = _format_int(drift_val)
+        drift_text = fmt_optional(_safe_number(drift_val), fmt_int)
 
         ts_value = snap.get("heartbeat_ts") or now
-        ts_text = _format_int(ts_value, fallback=str(int(now)))
+        ts_text = fmt_int(ts_value)
 
         signals_delta, trades_delta_window = self._signal_trade_delta()
-        signals_text = _format_int(signals_delta, fallback="0" if signals_delta is not None else "NA")
-        trades_window_text = _format_int(trades_delta_window, fallback="0" if trades_delta_window is not None else "NA")
-        dd_text = _format_percent(snap.get("daily_dd"), digits=1)
+        signals_val = _safe_number(signals_delta)
+        trades_window_val = _safe_number(trades_delta_window)
+        dd_val = _safe_number(snap.get("daily_dd"))
 
         _log_alert_payload(
             snap,
             trades_delta=trade_delta_value,
-            signals_delta=_safe_number(signals_delta),
+            signals_delta=signals_val,
             extra={"event": "heartbeat", "heartbeat_ts": _safe_number(ts_value)},
         )
 
-        message = (
-            f"HB ✅ run:{CONTEXT.run_id} acct:{CONTEXT.account_label} "
-            f"eq:{equity_text} rATR30:{avg_r_text} tradesΔ:{trade_delta_text} "
-            f"drift:{drift_text}ms ts:{ts_text}"
-        )
+        mode_label = config.get_trading_mode()
+        body_lines = [
+            "Equity",
+            equity_text,
+            "Daily DD",
+            fmt_optional(dd_val, fmt_percent_ratio),
+            "Avg R(30)",
+            avg_r_text,
+            "Trades Δ",
+            trade_delta_text,
+            "Signals Δ",
+            fmt_optional(signals_val, fmt_int),
+            "Window trades",
+            fmt_optional(trades_window_val, fmt_int),
+            f"run:{CONTEXT.run_id} acct:{mode_label} thread:{CONTEXT.thread_key('HB')}",
+        ]
+        message_body = "\n".join(body_lines)
 
+        formatted = CONTEXT.format_text(f"HB ✅\n{message_body}")
         blocks: List[Dict[str, Any]] = [
             {
                 "type": "section",
-                "fields": [
-                    {"type": "mrkdwn", "text": f"*Equity*\n{equity_text}"},
-                    {"type": "mrkdwn", "text": f"*Daily DD*\n{dd_text}"},
-                    {"type": "mrkdwn", "text": f"*Avg R(30)*\n{avg_r_text}"},
-                    {"type": "mrkdwn", "text": f"*Trades Δ*\n{trade_delta_text}"},
-                    {"type": "mrkdwn", "text": f"*Signals Δ*\n{signals_text}"},
-                    {"type": "mrkdwn", "text": f"*Window trades*\n{trades_window_text}"},
-                ],
-            },
-            {
-                "type": "context",
-                "elements": [
-                    {"type": "mrkdwn", "text": f"run:{CONTEXT.run_id} acct:{CONTEXT.account_label} thread:{CONTEXT.thread_key('HB')}"},
-                ],
-            },
+                "text": {"type": "mrkdwn", "text": message_body},
+            }
         ]
 
-        formatted = CONTEXT.format_text(message)
         if _send_with_blocks(self.slack, formatted, blocks=blocks):
             self.last_heartbeat_sent = now
             if trade_total_val is not None:
@@ -937,49 +944,32 @@ class AlertScheduler(threading.Thread):
         self._handle_emergency("no_trade", severity=signals_delta or 0.0, now=now, message=message, fields=fields, snapshot=self.metrics.get_snapshot() if self.metrics else {})
 
     def _check_auto_testnet(self, now: float, snap: Dict[str, Any]) -> None:
-        dd_value = snap.get("daily_dd")
-        try:
-            dd_float = float(dd_value)
-        except (TypeError, ValueError):
-            self._reset_emergency("auto_testnet_on_dd")
-            return
-        if not math.isfinite(dd_float):
-            self._reset_emergency("auto_testnet_on_dd")
-            return
-        try:
-            import config as cfg
-
-            auto_enabled = bool(getattr(cfg, "AUTO_TESTNET_ON_DD", False))
-            threshold = float(getattr(cfg, "DAILY_DD_LIMIT", 0.05))
-        except Exception:
-            auto_enabled = False
-            threshold = 0.0
-        if not auto_enabled:
-            self._reset_emergency("auto_testnet_on_dd")
-            return
-        if dd_float < threshold:
+        state = get_state()
+        dd_ratio = compute_daily_dd_ratio(state=state)
+        if config.get_trading_mode() != TradingMode.LIVE.value:
             self._reset_emergency("auto_testnet_on_dd")
             return
 
-        equity_value = _safe_number(snap.get("equity"))
-        if not equity_value or equity_value <= 0:
+        if dd_ratio < config.AUTO_TESTNET_ON_DD_THRESHOLD:
             self._reset_emergency("auto_testnet_on_dd")
             return
 
-        _, trades_delta_window = self._signal_trade_delta()
-        if trades_delta_window is None or trades_delta_window <= 0:
-            self._reset_emergency("auto_testnet_on_dd")
+        if state.is_deduped_today("AUTO_TESTNET_ON_DD"):
             return
 
         message = (
-            f"🚨 AUTO_TESTNET_ON_DD tripped: dd:{dd_float:.1%} threshold:{threshold:.1%}. "
-            f"Live entries paused. run:{CONTEXT.run_id} acct:{CONTEXT.account_label}"
+            f"🚨 AUTO_TESTNET_ON_DD triggered → daily dd {dd_ratio:.1%} (threshold {config.AUTO_TESTNET_ON_DD_THRESHOLD:.1%}). "
+            f"run:{CONTEXT.run_id} acct:{CONTEXT.account_label}"
         )
-        fields = [
-            {"type": "mrkdwn", "text": f"*Drawdown*\n{_format_percent(dd_float, digits=1)}"},
-            {"type": "mrkdwn", "text": f"*Threshold*\n{_format_percent(threshold, digits=1)}"},
-        ]
-        self._handle_emergency("auto_testnet_on_dd", severity=dd_float, now=now, message=message, fields=fields, snapshot=snap)
+        if self._guard_action:
+            try:
+                self._guard_action(dd_ratio)
+            except Exception as exc:
+                logger.warning("guard_action failed: %s", exc)
+
+        notifier = _get_notifier()
+        notifier.send_markdown(message)
+        state.mark_deduped_today("AUTO_TESTNET_ON_DD")
 
 
 def start_alert_scheduler(
@@ -988,8 +978,15 @@ def start_alert_scheduler(
     *,
     slack_sender: Callable[..., bool] = slack_notify_safely,
     interval_sec: float = 60.0,
+    guard_action: Optional[Callable[[float], None]] = None,
 ) -> AlertScheduler:
-    scheduler = AlertScheduler(metrics_manager or get_metrics_manager(), config, slack_sender, interval_sec=interval_sec)
+    scheduler = AlertScheduler(
+        metrics_manager or get_metrics_manager(),
+        config,
+        slack_sender,
+        interval_sec=interval_sec,
+        guard_action=guard_action,
+    )
     scheduler.start()
     return scheduler
 
