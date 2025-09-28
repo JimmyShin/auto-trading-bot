@@ -32,7 +32,6 @@ import requests
 from auto_trading_bot.metrics import get_metrics_manager, compute_daily_dd_ratio, get_state
 from auto_trading_bot.slack_notifier import SlackNotifier
 from auto_trading_bot.slack_fmt import fmt_optional, fmt_currency, fmt_percent_ratio, fmt_int, fmt_float2, DASH
-from auto_trading_bot.metrics import compute_daily_dd_ratio
 from auto_trading_bot.mode import TradingMode
 import config
 from auto_trading_bot.state_store import StateStore
@@ -520,9 +519,9 @@ def slack_notify_exit(
 
     equity_value = _safe_number(equity_usdt)
     if not equity_value or equity_value <= 0:
-        equity_text = "NA"
+        equity_text = DASH
         if not _EXIT_EQUITY_WARNED:
-            logger.warning("Exit equity unavailable; suppressing equity field in Slack payload.")
+            logger.warning("Exit equity unavailable; displaying en dash (—) in Slack payload.")
             _EXIT_EQUITY_WARNED = True
     else:
         equity_text = f"{equity_value:.2f}"
@@ -549,7 +548,7 @@ def slack_notify_exit(
     message = (
         f"✅ EXIT {symbol} {side.upper()} run:{CONTEXT.run_id} acct:{CONTEXT.account_label} "
         f"pnl:{_format_signed(pnl_usdt, suffix='USDT')} R:{_format_decimal(r_trade, digits=2)} "
-        f"eq_after:{_format_decimal(equity_usdt, digits=2)}"
+        f"eq_after:{equity_text}"
     )
 
     blocks: List[Dict[str, Any]] = [
@@ -958,7 +957,7 @@ class AlertScheduler(threading.Thread):
             return
 
         message = (
-            f"🚨 AUTO_TESTNET_ON_DD triggered → daily dd {dd_ratio:.1%} (threshold {config.AUTO_TESTNET_ON_DD_THRESHOLD:.1%}). "
+            f"🚨 AUTO_TESTNET_ON_DD triggered → daily dd {fmt_percent_ratio(dd_ratio)} (threshold {fmt_percent_ratio(config.AUTO_TESTNET_ON_DD_THRESHOLD)}). "
             f"run:{CONTEXT.run_id} acct:{CONTEXT.account_label}"
         )
         if self._guard_action:
