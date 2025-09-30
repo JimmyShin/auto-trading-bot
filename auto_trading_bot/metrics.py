@@ -7,9 +7,14 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
+
+import config
+from .exchange_api import ExchangeAPI
+from .state_store import StateStore
 
 __all__ = [
     "start_metrics_server",
@@ -17,6 +22,7 @@ __all__ = [
     "dump_current_metrics",
     "MetricsManager",
     "Metrics",
+    "compute_daily_dd_ratio",
 ]
 
 
@@ -50,8 +56,13 @@ def _log_metrics_update(name: str, labels: Dict[str, Any], value: Any) -> None:
 
 
 _bot_equity = Gauge("bot_equity", "Current account equity (quote)", ["account"])
+_bot_equity_quote = Gauge("bot_equity_quote", "Current account equity (quote currency)", ["account"])
 _bot_daily_drawdown = Gauge("bot_daily_drawdown", "Daily drawdown ratio", ["account"])
+_bot_daily_drawdown_ratio = Gauge("bot_daily_drawdown_ratio", "Daily drawdown ratio", ["account"])
 _bot_avg_r_atr_30 = Gauge("bot_avg_r_atr_30", "Rolling average ATR-based R over 30 trades", ["account"])
+_bot_trades_delta = Gauge("bot_trades_delta", "Trades delta within window", ["account"])
+_bot_signals_delta = Gauge("bot_signals_delta", "Signals delta within window", ["account"])
+_bot_window_trades = Gauge("bot_window_trades", "Closed trades in reporting window", ["account"])
 _bot_time_drift_ms = Gauge("bot_time_drift_ms", "Clock drift in milliseconds", ["source"])
 _bot_heartbeat_ts = Gauge("bot_heartbeat_ts", "Last heartbeat epoch seconds")
 _bot_trade_count_total = Counter("bot_trade_count_total", "Cumulative trade count", ["account"])
@@ -72,14 +83,70 @@ _bot_loop_latency_ms = Histogram(
 )
 
 
+def _set_optional(metric: Gauge, value: Optional[float]) -> None:
+    if value is None:
+        return
+    metric.set(float(value))
+
+
+_STATE: Optional[StateStore] = None
+_fetch_snapshot = None
+
+
+def get_state() -> StateStore:
+    global _STATE
+    if _STATE is None:
+        _STATE = StateStore(Path(config.STATE_STORE_PATH))
+    return _STATE
+
+
+def set_state_for_tests(state: StateStore) -> None:
+    global _STATE
+    _STATE = state
+
+
+def set_snapshot_fetcher(fetcher):
+    global _fetch_snapshot
+    _fetch_snapshot = fetcher
+
+
+def compute_dd_from_snapshot(snapshot, state: Optional[StateStore] = None) -> float:
+    store = state or get_state()
+    eq = max(0.0, float(snapshot.get("margin_balance", 0.0)))
+    ts = snapshot.get("ts_utc")
+    day = ts.date() if isinstance(ts, datetime) else datetime.now(timezone.utc).date()
+    peak = store.update_daily_peak_equity(eq, day=day)
+    if peak <= 0:
+        return 0.0
+    return max(0.0, min(1.0, 1.0 - (eq / peak)))
+
+
+def compute_daily_dd_ratio(*, state: Optional[StateStore] = None, snap: Optional[Dict[str, Any]] = None, exchange: Optional[ExchangeAPI] = None) -> float:
+    store = state or get_state()
+    snapshot = snap
+    if snapshot is None:
+        fetcher = _fetch_snapshot or (exchange or ExchangeAPI())
+        exchange_snap = fetcher.fetch_equity_snapshot() if hasattr(fetcher, "fetch_equity_snapshot") else fetcher()
+        snapshot = {
+            "margin_balance": exchange_snap.margin_balance,
+            "ts_utc": exchange_snap.ts_utc,
+        }
+    return compute_dd_from_snapshot(snapshot, state=store)
+
+
 class MetricsManager:
     """Coordinates Prometheus metrics and provides state snapshots."""
 
     def __init__(self, account: str) -> None:
         self.account = account
         self._equity_metric = _bot_equity.labels(account=account)
+        self._equity_quote_metric = _bot_equity_quote.labels(account=account)
         self._dd_metric = _bot_daily_drawdown.labels(account=account)
+        self._dd_ratio_metric = _bot_daily_drawdown_ratio.labels(account=account)
         self._avg_r_metric = _bot_avg_r_atr_30.labels(account=account)
+        self._trades_delta_metric = _bot_trades_delta.labels(account=account)
+        self._signals_delta_metric = _bot_signals_delta.labels(account=account)
+        self._window_trades_metric = _bot_window_trades.labels(account=account)
         self._trade_counter = _bot_trade_count_total.labels(account=account)
         self._heartbeat_metric = _bot_heartbeat_ts
         self._loop_hist = _bot_loop_latency_ms
@@ -94,8 +161,13 @@ class MetricsManager:
             "order_errors": {},
             "heartbeat_ts": None,
             "time_drift": {},
+            "trades_delta": None,
+            "signals_delta": None,
+            "window_trades": None,
         }
         self._heartbeat_thread: Optional[threading.Thread] = None
+        self._store = StateStore(Path(config.STATE_STORE_PATH))
+        self._exchange = ExchangeAPI()
 
     # --- Metrics setters -------------------------------------------------
     def set_equity(self, value: Optional[float]) -> None:
@@ -104,9 +176,11 @@ class MetricsManager:
         else:
             stored = float(value)
             self._equity_metric.set(stored)
+            self._equity_quote_metric.set(stored)
         with self._lock:
             self._state["equity"] = stored
         _log_metrics_update("bot_equity", {"account": self.account}, stored)
+        _log_metrics_update("bot_equity_quote", {"account": self.account}, stored)
 
     def set_daily_drawdown(self, ratio: Optional[float]) -> None:
         if ratio is None or not math.isfinite(float(ratio)):
@@ -114,9 +188,11 @@ class MetricsManager:
         else:
             stored = max(0.0, float(ratio))
             self._dd_metric.set(stored)
+            self._dd_ratio_metric.set(stored)
         with self._lock:
             self._state["daily_dd"] = stored
         _log_metrics_update("bot_daily_drawdown", {"account": self.account}, stored)
+        _log_metrics_update("bot_daily_drawdown_ratio", {"account": self.account}, stored)
 
     def set_avg_r(self, value: Optional[float]) -> None:
         if value is None or not math.isfinite(float(value)):
@@ -127,6 +203,36 @@ class MetricsManager:
         with self._lock:
             self._state["avg_r"] = stored
         _log_metrics_update("bot_avg_r_atr_30", {"account": self.account}, stored)
+
+    def set_trades_delta(self, value: Optional[float]) -> None:
+        if value is None or not math.isfinite(float(value)):
+            stored = None
+        else:
+            stored = float(value)
+            self._trades_delta_metric.set(stored)
+        with self._lock:
+            self._state["trades_delta"] = stored
+        _log_metrics_update("bot_trades_delta", {"account": self.account}, stored)
+
+    def set_signals_delta(self, value: Optional[float]) -> None:
+        if value is None or not math.isfinite(float(value)):
+            stored = None
+        else:
+            stored = float(value)
+            self._signals_delta_metric.set(stored)
+        with self._lock:
+            self._state["signals_delta"] = stored
+        _log_metrics_update("bot_signals_delta", {"account": self.account}, stored)
+
+    def set_window_trades(self, value: Optional[float]) -> None:
+        if value is None or not math.isfinite(float(value)):
+            stored = None
+        else:
+            stored = float(value)
+            self._window_trades_metric.set(stored)
+        with self._lock:
+            self._state["window_trades"] = stored
+        _log_metrics_update("bot_window_trades", {"account": self.account}, stored)
 
     def set_time_drift(self, source: str, drift_ms: float) -> None:
         metric = self._time_drift_metrics.get(source)

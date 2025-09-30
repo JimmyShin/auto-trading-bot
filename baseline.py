@@ -12,9 +12,43 @@ import pandas as pd
 from config import ATR_LEN, TF, UNIVERSE
 from indicators import atr
 from strategy import DonchianATREngine
+import logging
 
 DATA_ROOT = Path(os.getenv("BASELINE_OHLCV_DIR", str(Path("data") / "backtest" / "ohlcv")))
 DEFAULT_BASELINE_PATH = Path("data") / "testnet" / "baseline.json"
+
+logger = logging.getLogger(__name__)
+
+# Heuristics for detecting synthetic/fallback outputs that caused nightly regression:
+# - Constant-ish close/ATR across many symbols (observed patterns)
+FALLBACK_CLOSE_SENTINELS = {10402, 10452}
+FALLBACK_ATR_SENTINELS = {13.0}
+
+
+def _truthy(val: Optional[str]) -> bool:
+    return str(val or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def looks_like_fallback(symbols_dict: Dict[str, List[Dict[str, Any]]]) -> bool:
+    """Detect synthetic-like baseline: identical first-bar patterns across symbols."""
+    if not symbols_dict:
+        return True  # empty means we likely failed to load data
+    sample = 0
+    hits = 0
+    for sym, arr in symbols_dict.items():
+        if not arr:
+            hits += 1
+            continue
+        a0 = arr[0]
+        try:
+            close_i = int(float(a0.get("close", 0)))
+            atr_f = float(a0.get("atr", "nan"))
+        except Exception:
+            continue
+        sample += 1
+        if (close_i in FALLBACK_CLOSE_SENTINELS) or (atr_f in FALLBACK_ATR_SENTINELS):
+            hits += 1
+    return sample == 0 or (hits >= max(1, sample // 2))
 
 
 def _round(value: Any, digits: int) -> float:
@@ -84,6 +118,10 @@ def generate_baseline(
 ) -> Dict[str, Any]:
     """Generate baseline decisions for the provided symbols."""
     symbols = list(symbols or UNIVERSE)
+    logger.info(
+        "BL INPUT symbols=%s tf=%s bars=%s BASELINE_OHLCV_DIR=%s TESTNET=%s",
+        symbols[:5], timeframe, bars, os.getenv("BASELINE_OHLCV_DIR"), os.getenv("TESTNET")
+    )
     engine = DonchianATREngine(persist_state=False, initial_state={})
     engine.reset_daily_anchor(equity)
 
@@ -196,6 +234,17 @@ def generate_baseline(
 
         baseline["symbols"][symbol] = records[-bars:]
 
+    # Fallback guard: block silently synthetic baselines unless explicitly allowed
+    if looks_like_fallback(baseline.get("symbols", {})):
+        logger.warning(
+            "Baseline generator produced SYNTHETIC-like output. "
+            "Check DATA/loader. BASELINE_OHLCV_DIR=%s TESTNET=%s",
+            os.getenv("BASELINE_OHLCV_DIR"), os.getenv("TESTNET"),
+        )
+        if not _truthy(os.getenv("ALLOW_SYNTHETIC_BASELINE")):
+            raise RuntimeError(
+                "Synthetic/fallback baseline detected. Set ALLOW_SYNTHETIC_BASELINE=1 to bypass (not recommended)."
+            )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(baseline, f, indent=2)
