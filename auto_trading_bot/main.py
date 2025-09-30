@@ -521,6 +521,7 @@ class EmergencyManager:
         _rearm_protective_stops(self.exchange, self.engine)
 
         if self.emergency_policy == "flatten_all":
+            detail = "unknown"
             if failed:
                 detail_parts: list[str] = []
                 for item in failed:
