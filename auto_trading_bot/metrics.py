@@ -81,6 +81,32 @@ _bot_loop_latency_ms = Histogram(
     "Main loop latency in milliseconds",
     buckets=(10, 25, 50, 100, 250, 500, 1000, 2500, 5000),
 )
+_flatten_failures_total = Counter(
+    "flatten_failures_total",
+    "Emergency flatten failures by reason",
+    ["account", "reason"],
+)
+_flatten_partial_total = Counter(
+    "flatten_partial_total",
+    "Emergency flatten outcomes that skipped or partially completed",
+    ["account", "reason"],
+)
+_tp_orders_placed_total = Counter(
+    "tp_orders_placed_total",
+    "Take-profit limit orders placed",
+    ["account", "symbol", "side"],
+)
+_tp_fills_total = Counter(
+    "tp_fills_total",
+    "Take-profit fills observed",
+    ["account", "symbol", "side", "reason"],
+)
+_order_latency_seconds = Histogram(
+    "order_latency_seconds",
+    "Latency of order submissions in seconds",
+    ["account", "kind"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+)
 
 
 def _set_optional(metric: Gauge, value: Optional[float]) -> None:
@@ -164,6 +190,11 @@ class MetricsManager:
             "trades_delta": None,
             "signals_delta": None,
             "window_trades": None,
+            "flatten_failures": {},
+            "flatten_partial": {},
+            "tp_orders": {},
+            "tp_fills": {},
+            "order_latency": {},
         }
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._store = StateStore(Path(config.STATE_STORE_PATH))
@@ -274,6 +305,90 @@ class MetricsManager:
     def observe_loop_latency(self, latency_ms: float) -> None:
         self._loop_hist.observe(latency_ms)
 
+    def inc_flatten_failure(self, reason: str, amount: float = 1.0) -> None:
+        label_reason = reason or "unknown"
+        _flatten_failures_total.labels(account=self.account, reason=label_reason).inc(amount)
+        with self._lock:
+            totals = dict(self._state.get("flatten_failures", {}))
+            totals[label_reason] = float(totals.get(label_reason, 0.0)) + float(amount)
+            self._state["flatten_failures"] = totals
+            total_for_reason = totals[label_reason]
+        _log_metrics_update(
+            "flatten_failures_total",
+            {"account": self.account, "reason": label_reason},
+            total_for_reason,
+        )
+
+    def inc_flatten_partial(self, reason: str, amount: float = 1.0) -> None:
+        label_reason = reason or "unknown"
+        _flatten_partial_total.labels(account=self.account, reason=label_reason).inc(amount)
+        with self._lock:
+            totals = dict(self._state.get("flatten_partial", {}))
+            totals[label_reason] = float(totals.get(label_reason, 0.0)) + float(amount)
+            self._state["flatten_partial"] = totals
+            total_for_reason = totals[label_reason]
+        _log_metrics_update(
+            "flatten_partial_total",
+            {"account": self.account, "reason": label_reason},
+            total_for_reason,
+        )
+
+    def inc_tp_orders(self, symbol: str, side: str, amount: float = 1.0) -> None:
+        side_label = (side or "").upper() or "UNKNOWN"
+        _tp_orders_placed_total.labels(account=self.account, symbol=symbol, side=side_label).inc(amount)
+        with self._lock:
+            totals = dict(self._state.get("tp_orders", {}))
+            key = (symbol, side_label)
+            totals[key] = float(totals.get(key, 0.0)) + float(amount)
+            self._state["tp_orders"] = totals
+            total_for_key = totals[key]
+        _log_metrics_update(
+            "tp_orders_placed_total",
+            {"account": self.account, "symbol": symbol, "side": side_label},
+            total_for_key,
+        )
+
+    def inc_tp_fill(self, symbol: str, side: str, reason: str, amount: float = 1.0) -> None:
+        side_label = (side or "").upper() or "UNKNOWN"
+        reason_label = reason or "unknown"
+        _tp_fills_total.labels(
+            account=self.account,
+            symbol=symbol,
+            side=side_label,
+            reason=reason_label,
+        ).inc(amount)
+        with self._lock:
+            totals = dict(self._state.get("tp_fills", {}))
+            key = (symbol, side_label, reason_label)
+            totals[key] = float(totals.get(key, 0.0)) + float(amount)
+            self._state["tp_fills"] = totals
+            total_for_key = totals[key]
+        _log_metrics_update(
+            "tp_fills_total",
+            {
+                "account": self.account,
+                "symbol": symbol,
+                "side": side_label,
+                "reason": reason_label,
+            },
+            total_for_key,
+        )
+
+    def observe_order_latency(self, kind: str, latency_seconds: float) -> None:
+        if latency_seconds is None:
+            return
+        kind_label = kind or "unknown"
+        _order_latency_seconds.labels(account=self.account, kind=kind_label).observe(float(latency_seconds))
+        with self._lock:
+            latencies = dict(self._state.get("order_latency", {}))
+            latencies[kind_label] = float(latency_seconds)
+            self._state["order_latency"] = latencies
+        _log_metrics_update(
+            "order_latency_seconds",
+            {"account": self.account, "kind": kind_label},
+            float(latency_seconds),
+        )
+
     # --- Heartbeat --------------------------------------------------------
     def set_heartbeat(self, timestamp: Optional[float] = None) -> None:
         if timestamp is None:
@@ -308,6 +423,11 @@ class MetricsManager:
                 "order_errors": dict(self._state.get("order_errors", {})),
                 "heartbeat_ts": self._state.get("heartbeat_ts"),
                 "time_drift": dict(self._state.get("time_drift", {})),
+                "flatten_failures": dict(self._state.get("flatten_failures", {})),
+                "flatten_partial": dict(self._state.get("flatten_partial", {})),
+                "tp_orders": dict(self._state.get("tp_orders", {})),
+                "tp_fills": dict(self._state.get("tp_fills", {})),
+                "order_latency": dict(self._state.get("order_latency", {})),
             }
         return state_copy
 

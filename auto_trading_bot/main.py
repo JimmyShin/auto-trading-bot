@@ -7,6 +7,7 @@ import atexit
 import logging
 import math
 import json
+from logging import Logger
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone, timedelta
 from threading import Lock
@@ -27,6 +28,7 @@ try:
     from scripts.daily_report import generate_report as _gen_daily_report
 except Exception:
     _gen_daily_report = None
+
 logger = logging.getLogger("donchian_bot")
 if not logger.handlers:
     logger.setLevel(logging.INFO)
@@ -40,7 +42,6 @@ if not logger.handlers:
     except Exception:
         pass
     logger.addHandler(_ch)
-
 metrics_store = Metrics()
 reporter = Reporter.from_config(metrics=metrics_store)
 alerts = Alerts(
@@ -93,6 +94,13 @@ def compute_tp_ladder(entry_px: float, side: str, base_qty: float) -> List[Dict[
     return levels
 
 
+def _log_json(logger_obj: Logger, level: int, payload: Dict[str, Any], *, extra_fields: Optional[Dict[str, Any]] = None) -> None:
+    data = dict(payload)
+    if extra_fields:
+        data.update(extra_fields)
+    logger_obj.log(level, json.dumps(data, sort_keys=True))
+
+
 def _replace_stop_only(b: ExchangeAPI, symbol: str, position_side: str, stop_price: float, qty: float) -> None:
     if qty <= 0 or stop_price <= 0:
         return
@@ -139,15 +147,15 @@ def place_tp_ladder(
         }
         if qty <= 0:
             payload = {'type': 'TP_SKIP', 'reason': 'zero_qty', **payload_base}
-            logger.info(json.dumps(payload, sort_keys=True))
+            _log_json(logger, logging.INFO, payload)
             continue
         if px <= 0:
             payload = {'type': 'TP_SKIP', 'reason': 'precision', **payload_base}
-            logger.info(json.dumps(payload, sort_keys=True))
+            _log_json(logger, logging.INFO, payload)
             continue
         if min_notional > 0 and qty * px < min_notional:
             payload = {'type': 'TP_SKIP', 'reason': 'minNotional', **payload_base}
-            logger.info(json.dumps(payload, sort_keys=True))
+            _log_json(logger, logging.INFO, payload)
             continue
         payload = {'type': 'TP_PLACE', **payload_base}
         try:
@@ -159,13 +167,23 @@ def place_tp_ladder(
                 reduce_only=True,
                 time_in_force='GTC',
             )
-            logger.info(json.dumps(payload, sort_keys=True))
+            metrics_mgr = get_metrics_manager()
+            if metrics_mgr is not None:
+                try:
+                    metrics_mgr.inc_tp_orders(symbol, exit_side)
+                except Exception:
+                    pass
+            _log_json(logger, logging.INFO, payload)
             placed_any = True
         except Exception as exc:
             payload_err = {'type': 'TP_SKIP', 'reason': 'order_error', 'error': str(exc), **payload_base}
-            logger.warning(json.dumps(payload_err, sort_keys=True))
+            _log_json(logger, logging.WARNING, payload_err)
     if not placed_any:
-        logger.warning(json.dumps({'type': 'TP_WARN', 'symbol': symbol, 'side': exit_side.upper(), 'reason': 'all_skipped'}, sort_keys=True))
+        _log_json(
+            logger,
+            logging.WARNING,
+            {'type': 'TP_WARN', 'symbol': symbol, 'side': exit_side.upper(), 'reason': 'all_skipped'},
+        )
 
 
 def _ensure_protective_stop_on_restart(b: ExchangeAPI, eng: DonchianATREngine, symbol: str) -> bool:
@@ -221,13 +239,40 @@ def _ensure_protective_stop_on_restart(b: ExchangeAPI, eng: DonchianATREngine, s
                 pass
         except Exception:
             pass
-        print(f"[SAFE] {symbol} restart protective stop @ {float(stop_price):.4f}")
+        _log_json(
+            logger,
+            logging.INFO,
+            {
+                'event': 'restart_stop_applied',
+                'symbol': symbol,
+                'stop_price': float(stop_price),
+                'qty': float(amt),
+            },
+        )
         return True
     except BalanceAuthError as auth_err:
-        print(f"[FATAL] {symbol} restart stop failed: {auth_err}")
+        _log_json(
+            logger,
+            logging.ERROR,
+            {
+                'event': 'restart_stop_failed',
+                'symbol': symbol,
+                'error': str(auth_err),
+                'error_type': 'auth',
+            },
+        )
         raise
     except Exception as e:
-        print(f"[WARN] {symbol} restart stop failed: {e}")
+        _log_json(
+            logger,
+            logging.WARNING,
+            {
+                'event': 'restart_stop_failed',
+                'symbol': symbol,
+                'error': str(e),
+                'error_type': 'generic',
+            },
+        )
         return False
 
 
@@ -285,13 +330,39 @@ def _rearm_protective_stops(exchange: Optional[ExchangeAPI], eng: Optional[Donch
                 _ensure_protective_stop_on_restart(exchange, eng, symbol)
             except BalanceAuthError as auth_err:
                 fatal_auth = True
-                print(f"[FATAL] {symbol} emergency protect failed: {auth_err}")
+                _log_json(
+                    logger,
+                    logging.ERROR,
+                    {
+                        'event': 'emergency_rearm_failed',
+                        'symbol': symbol,
+                        'error': str(auth_err),
+                        'error_type': 'auth',
+                    },
+                )
             except Exception as exc:
-                print(f"[WARN] {symbol} emergency protect failed: {exc}")
+                _log_json(
+                    logger,
+                    logging.WARNING,
+                    {
+                        'event': 'emergency_rearm_failed',
+                        'symbol': symbol,
+                        'error': str(exc),
+                        'error_type': 'generic',
+                    },
+                )
         if not fatal_auth:
-            print('[OK] Emergency handling completed')
+            _log_json(
+                logger,
+                logging.INFO,
+                {'event': 'emergency_rearm_complete', 'symbols': list(UNIVERSE)},
+            )
     except Exception as exc:
-        print(f"[ERR] Emergency handling error: {exc}")
+        _log_json(
+            logger,
+            logging.ERROR,
+            {'event': 'emergency_rearm_error', 'error': str(exc)},
+        )
 
 
 class EmergencyManager:
@@ -413,7 +484,15 @@ class EmergencyManager:
         reason_text = reason or "unspecified"
         attempt_message = f"[EMERGENCY] Policy '{self.emergency_policy}' triggered by {reason_text}; initiating cleanup."
         self.notify(attempt_message)
-        logger.warning("Emergency cleanup triggered: policy=%s reason=%s", self.emergency_policy, reason_text)
+        _log_json(
+            logger,
+            logging.WARNING,
+            {
+                'event': 'emergency_cleanup_start',
+                'policy': self.emergency_policy,
+                'reason': reason_text,
+            },
+        )
 
         deadline = self._next_utc_midnight(now)
 
@@ -425,7 +504,11 @@ class EmergencyManager:
                 f"{deadline.isoformat().replace('+00:00', 'Z')}."
             )
             self.notify(completion_message)
-            logger.info("Protect-only policy applied; entries blocked until %s", deadline)
+            _log_json(
+                logger,
+                logging.INFO,
+                {'event': 'protect_only_applied', 'block_until': deadline.isoformat()},
+            )
             return
 
         require_profit = self.emergency_policy == "flatten_if_safe"
@@ -455,13 +538,23 @@ class EmergencyManager:
                     detail_parts.append(f"{symbol} rem={remaining_text} ({reason_note})")
                 detail = "; ".join(detail_parts) if detail_parts else "unknown"
                 self.notify(f"[EMERGENCY] Flatten_all incomplete: {detail}. Manual intervention required.")
-                logger.error("Flatten_all failed to flatten all positions: %s", detail)
+            logger.error("Flatten_all failed to flatten all positions: %s", detail)
+            metrics_mgr = get_metrics_manager()
+            if metrics_mgr is not None:
+                try:
+                    metrics_mgr.inc_flatten_failure("order_error")
+                except Exception:
+                    pass
             else:
                 count = len(closed)
                 self.notify(
                     f"[EMERGENCY] Policy 'flatten_all' executed successfully; {count} positions confirmed flat."
                 )
-                logger.info("Flatten_all succeeded; %s positions closed.", count)
+                _log_json(
+                    logger,
+                    logging.INFO,
+                    {'event': 'flatten_all_success', 'closed_count': count},
+                )
         else:
             closed_count = len(closed)
             if closed_count:
@@ -475,7 +568,17 @@ class EmergencyManager:
                 logger.error("Flatten_if_safe encountered failures: %s", failed)
 
         if skipped:
-            logger.info("Emergency flatten skipped %s symbols: %s", len(skipped), skipped)
+            _log_json(
+                logger,
+                logging.INFO,
+                {'event': 'flatten_skipped', 'count': len(skipped), 'symbols': skipped},
+            )
+            metrics_mgr = get_metrics_manager()
+            if metrics_mgr is not None:
+                try:
+                    metrics_mgr.inc_flatten_partial("not_profitable")
+                except Exception:
+                    pass
 
     def _flatten_positions(self, require_profit: bool) -> Dict[str, Any]:
         outcomes: Dict[str, list[Dict[str, Any]]] = {"closed": [], "failed": [], "skipped": []}
@@ -516,6 +619,12 @@ class EmergencyManager:
                         "initial_qty": meta_info.get("initial_qty"),
                     }
                 )
+            metrics_mgr = get_metrics_manager()
+            if metrics_mgr is not None:
+                try:
+                    metrics_mgr.inc_flatten_failure("missing_handler")
+                except Exception:
+                    pass
             return outcomes
 
         results = flatten_fn(
@@ -524,6 +633,7 @@ class EmergencyManager:
             backoff_sec=self.order_retry_backoff_sec,
         ) or []
 
+        metrics_mgr = get_metrics_manager()
         for result in results:
             if not isinstance(result, dict):
                 continue
@@ -539,6 +649,11 @@ class EmergencyManager:
             else:
                 result.setdefault("remaining_qty", meta_info.get("initial_qty"))
                 outcomes["failed"].append(result)
+                if metrics_mgr is not None:
+                    try:
+                        metrics_mgr.inc_flatten_failure(result.get("reason") or "unknown")
+                    except Exception:
+                        pass
 
         reported = {entry.get("symbol") for entry in results if isinstance(entry, dict)}
         for symbol in targets:
@@ -553,6 +668,11 @@ class EmergencyManager:
                         "initial_qty": meta_info.get("initial_qty"),
                     }
                 )
+                if metrics_mgr is not None:
+                    try:
+                        metrics_mgr.inc_flatten_partial("no_response")
+                    except Exception:
+                        pass
 
         return outcomes
 
@@ -617,9 +737,13 @@ def emergency_cleanup(reason: str = "manual") -> None:
     manager = emergency_manager
     if manager:
         try:
-            emergency_mgr.execute_cleanup(reason, datetime.now(timezone.utc))
+            manager.execute_cleanup(reason, datetime.now(timezone.utc))
         except Exception as exc:
-            print(f"[WARN] emergency cleanup failed: {exc}")
+            _log_json(
+                logger,
+                logging.WARNING,
+                {'event': 'emergency_cleanup_failed', 'reason': reason, 'error': str(exc)},
+            )
     else:
         _rearm_protective_stops(b_global, eng_global)
 
@@ -642,9 +766,17 @@ def fetch_df(b: ExchangeAPI, symbol: str, tf: str, lookback: int) -> pd.DataFram
 
 
 def main():
-    print(f"🚀 Donchian-ATR Bot (SAFE MODE) | TF={TF} | Risk={RISK_PCT*100:.0f}% | Lev={LEVERAGE}x")
-    print(f"Symbols: {', '.join(UNIVERSE)}")
-    print("="*40)
+    logger.info(
+        "Bot startup",
+        extra={
+            'event': 'startup_banner',
+            'mode': 'SAFE',
+            'tf': TF,
+            'risk_pct': RISK_PCT,
+            'leverage': LEVERAGE,
+            'universe': list(UNIVERSE),
+        },
+    )
 
     metrics_port = int(OBSERVABILITY.get("metrics_port", 9108))
     account_label = str(OBSERVABILITY.get("account_label", "live"))
@@ -722,10 +854,10 @@ def main():
     # On startup, re-arm protective stops and sync state for any existing positions
     try:
         startup_sync(b, eng)
-        print("Trading loop starting...")
+        logger.info("Trading loop starting", extra={'event': 'loop_start'})
     except BalanceAuthError as auth_err:
         logger.error('Startup protective stop auth error: %s', auth_err)
-        print('[FATAL] Binance rejected credentials while restoring protective stops.')
+        logger.error('Startup protective stop auth error: %s', auth_err, extra={'event': 'startup_protective_stop_error', 'error_type': 'auth'})
         try:
             slack_notify_safely(f":rotating_light: Protective stop restore failed: {auth_err}")
         except Exception:
@@ -733,7 +865,11 @@ def main():
         emergency_cleanup()
         return
     except Exception as e:
-        print(f"[WARN] startup protect failed: {e}")
+        _log_json(
+            logger,
+            logging.WARNING,
+            {'event': 'startup_protect_failed', 'error': str(e)},
+        )
 
     last_bar_ts = {sym: None for sym in UNIVERSE}
     last_heartbeat = 0.0
@@ -755,7 +891,15 @@ def main():
                 alerts.maybe_emit_heartbeat(now_utc=snap.ts_utc)
             except BalanceAuthError as auth_err:
                 logger.error('Balance auth error: %s', auth_err)
-                print('[FATAL] Binance authentication failed; stopping bot for safety.')
+                _log_json(
+                    logger,
+                    logging.ERROR,
+                    {
+                        'event': 'balance_fetch_failed',
+                        'type': 'auth',
+                        'error': str(auth_err),
+                    },
+                )
                 emergency_mgr.record_error('auth')
                 try:
                     slack_notify_safely(f":rotating_light: Runtime auth failure: {auth_err}")
@@ -766,7 +910,15 @@ def main():
                 raise SystemExit(1)
             except BalanceSyncError as sync_err:
                 logger.error('Balance sync failure: %s', sync_err)
-                print('[FATAL] Unable to stay behind Binance server time; stopping bot.')
+                _log_json(
+                    logger,
+                    logging.ERROR,
+                    {
+                        'event': 'balance_fetch_failed',
+                        'type': 'time_drift',
+                        'error': str(sync_err),
+                    },
+                )
                 emergency_mgr.record_error('time_drift')
                 try:
                     slack_notify_safely(f":rotating_light: Runtime time sync failure: {sync_err}")
@@ -777,10 +929,15 @@ def main():
                 raise SystemExit(2)
             except Exception as bal_err:
                 logger.warning('Balance fetch error, using cached equity: %s', bal_err)
-                if last_equity > 0:
-                    print(f'[WARN] Using cached equity {last_equity:.2f} after balance error.')
-                else:
-                    print(f'[WARN] Balance fetch failed before first successful read: {bal_err}')
+                _log_json(
+                    logger,
+                    logging.WARNING,
+                    {
+                        'event': 'balance_fetch_warning',
+                        'equity_cached': last_equity,
+                        'error': str(bal_err),
+                    },
+                )
             metrics_mgr.set_equity(eq)
             raw_client = getattr(b, 'raw', None)
             if raw_client is not None:
@@ -793,7 +950,15 @@ def main():
             # Heartbeat every ~30s
             now = time.time()
             if now - last_heartbeat > 30:
-                print(f"[HB] {datetime.utcnow().strftime('%H:%M:%S')} equity={eq:.2f}")
+                _log_json(
+                    logger,
+                    logging.INFO,
+                    {
+                        'event': 'heartbeat',
+                        'equity': eq,
+                        'ts_utc': datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace('+00:00', 'Z'),
+                    },
+                )
                 # Position snapshots
                 try:
                     for _sym in UNIVERSE:
@@ -814,7 +979,18 @@ def main():
                                 # Last known protective/trailing stop from state (persisted when we place it)
                                 _trail = _st.get('last_trail_stop')
                                 _trail_val = float(_trail) if _trail is not None else 0.0
-                                print(f"[POS] {_sym} {_side} qty={_amt:.6f} entry={_entry:.4f} stop={_trail_val:.4f}")
+                                _log_json(
+                                    logger,
+                                    logging.INFO,
+                                    {
+                                        'event': 'position_snapshot',
+                                        'symbol': _sym,
+                                        'side': _side,
+                                        'qty': round(_amt, 6),
+                                        'entry': round(_entry, 4),
+                                        'stop': round(_trail_val, 4),
+                                    },
+                                )
                         except Exception:
                             pass
                 except Exception:
@@ -871,7 +1047,15 @@ def main():
                         entries_blocked = emergency_mgr.should_block_entries(now_utc)
                         log_signal_analysis(symbol, close, sig, is_new_bar, funding_avoid, daily_loss_hit, eq, dd_pct, plan.get('decision'), plan.get('skip_reason'))
                     except Exception as _e:
-                        print(f"[WARN] signal log error {symbol}: {_e}")
+                        _log_json(
+                            logger,
+                            logging.WARNING,
+                            {
+                                'event': 'signal_log_error',
+                                'symbol': symbol,
+                                'error': str(_e),
+                            },
+                        )
                     if is_new_bar:
                         dec = plan.get('decision')
                         sk = plan.get('skip_reason')
@@ -883,7 +1067,25 @@ def main():
                         rmult = (sig or {}).get('risk_multiplier', {}) or {}
                         rmL = rmult.get('long', 1.0)
                         rmS = rmult.get('short', 1.0)
-                        print(f"[BAR] {symbol} {bar_ts.strftime('%Y-%m-%d %H:%M')} close={close:.4f} atr={atr_abs:.2f} fast={fast_ma:.2f} slow={slow_ma:.2f} ma={ma_diff_pct:+.2f}% pos={pos_ratio:.2f} rmL={rmL} rmS={rmS} decision={dec} skip={sk}")
+                        _log_json(
+                            logger,
+                            logging.INFO,
+                            {
+                                'event': 'bar',
+                                'symbol': symbol,
+                                'ts': bar_ts.isoformat(),
+                                'close': round(close, 4),
+                                'atr': round(atr_abs, 4),
+                                'fast_ma': round(fast_ma, 4),
+                                'slow_ma': round(slow_ma, 4),
+                                'ma_diff_pct': round(ma_diff_pct, 4),
+                                'pos_ratio': round(pos_ratio, 4),
+                                'rm_long': rmL,
+                                'rm_short': rmS,
+                                'decision': dec,
+                                'skip_reason': sk,
+                            },
+                        )
 
                     # Manage trailing stop if in position
                     try:
@@ -940,7 +1142,17 @@ def main():
                                                 log_detailed_entry(symbol, side_tag, close, eff_add, new_trail, 1.0, sig_for_add, atr_abs, eq, reason_tag, ['pyramid_trigger'])
                                             except Exception:
                                                 pass
-                                            print(f"[ADD] {symbol} level={pyr_level} qty={eff_add:.6f} px={close:.4f}")
+                                            _log_json(
+                                                logger,
+                                                logging.INFO,
+                                                {
+                                                    'event': 'pyramid_add',
+                                                    'symbol': symbol,
+                                                    'level': pyr_level,
+                                                    'qty': round(eff_add, 6),
+                                                    'price': round(close, 4),
+                                                },
+                                            )
                                             levels_add = compute_tp_ladder(close, side, eff_add)
                                             place_tp_ladder(
                                                 b,
@@ -960,7 +1172,15 @@ def main():
                                             except Exception:
                                                 pass
                                         except Exception as _pe:
-                                            print(f"[WARN] pyramiding add failed {symbol}: {_pe}")
+                                            _log_json(
+                                                logger,
+                                                logging.WARNING,
+                                                {
+                                                    'event': 'pyramid_add_failed',
+                                                    'symbol': symbol,
+                                                    'error': str(_pe),
+                                                },
+                                            )
                         except Exception:
                             pass
 
@@ -1009,13 +1229,38 @@ def main():
                                     levels,
                                     precision_info,
                                 )
-                            print(f"[ENTRY] {symbol} {decision} qty={eff_qty:.6f} px={close:.4f} stop={stop_price:.4f}")
+                            metrics_mgr = get_metrics_manager()
+                            if metrics_mgr is not None:
+                                try:
+                                    metrics_mgr.observe_order_latency('entry_market', time.perf_counter() - loop_start)
+                                except Exception:
+                                    pass
+                            _log_json(
+                                logger,
+                                logging.INFO,
+                                {
+                                    'event': 'entry',
+                                    'symbol': symbol,
+                                    'decision': decision,
+                                    'qty': round(eff_qty, 6),
+                                    'price': round(close, 4),
+                                    'stop': round(stop_price, 4),
+                                },
+                            )
                         except Exception as e:
                             try:
                                 metrics_mgr.inc_order_error('order')
                             except Exception:
                                 pass
-                            print(f"[WARN] entry failed {symbol}: {e}")
+                            _log_json(
+                                logger,
+                                logging.WARNING,
+                                {
+                                    'event': 'entry_failed',
+                                    'symbol': symbol,
+                                    'error': str(e),
+                                },
+                            )
 
                     # Detect exit (position disappeared while state says in_position)
                     st_state = eng.state.get(symbol, {}) if eng else {}
@@ -1050,12 +1295,40 @@ def main():
                             try:
                                 if pnl_pct < -0.5:
                                     eng.record_stop_loss_exit(symbol, side_state, exit_price_used)
-                                    print(f"[EXIT] {symbol} stop-loss recorded {pnl_pct:+.2f}%")
+                                    _log_json(
+                                        logger,
+                                        logging.INFO,
+                                        {
+                                            'event': 'exit',
+                                            'symbol': symbol,
+                                            'side': side_state,
+                                            'pnl_pct': round(pnl_pct, 4),
+                                            'category': 'stop_loss',
+                                        },
+                                    )
                                 else:
                                     eng.clear_position_state(symbol)
-                                    print(f"[EXIT] {symbol} position closed {pnl_pct:+.2f}%")
+                                    _log_json(
+                                        logger,
+                                        logging.INFO,
+                                        {
+                                            'event': 'exit',
+                                            'symbol': symbol,
+                                            'side': side_state,
+                                            'pnl_pct': round(pnl_pct, 4),
+                                            'category': 'position_closed',
+                                        },
+                                    )
                             except Exception as _se:
-                                print(f"[WARN] state update after exit failed {symbol}: {_se}")
+                                _log_json(
+                                    logger,
+                                    logging.WARNING,
+                                    {
+                                        'event': 'exit_state_update_failed',
+                                        'symbol': symbol,
+                                        'error': str(_se),
+                                    },
+                                )
                             # Slack notification for EXIT only
                             try:
                                 # Use qty from state if available to estimate PnL in USDT
@@ -1101,7 +1374,15 @@ def main():
                             except Exception:
                                 pass
                         except Exception as e:
-                            print(f"[WARN] exit detection failed {symbol}: {e}")
+                            _log_json(
+                                logger,
+                                logging.WARNING,
+                                {
+                                    'event': 'exit_detection_failed',
+                                    'symbol': symbol,
+                                    'error': str(e),
+                                },
+                            )
                 except Exception as se:
                     logger.exception("Loop error for %s: %s", symbol, se)
             time.sleep(POLL_SEC)
@@ -1122,7 +1403,11 @@ def main():
             except Exception:
                 pass
             logger.exception("Unexpected error: %s", e)
-            print("3s retry...")
+            _log_json(
+                logger,
+                logging.INFO,
+                {'event': 'loop_retry', 'delay_sec': 3},
+            )
             time.sleep(3)
         finally:
             metrics_mgr.observe_loop_latency((time.perf_counter() - loop_start) * 1000.0)
