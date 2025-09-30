@@ -5,9 +5,9 @@ from typing import Any, Dict, List
 import pandas as pd
 import pytest
 
-from baseline import DEFAULT_BASELINE_PATH
 from auto_trading_bot.reporter import generate_report
 from backtest.metrics import equity_curve, max_drawdown
+from baseline import DEFAULT_BASELINE_PATH
 
 # Mark this module as regression (computes equity curve from baseline trades)
 pytestmark = pytest.mark.regression
@@ -26,7 +26,11 @@ def _extract_trades_from_records(symbol_records: List[Dict[str, Any]]) -> pd.Dat
         if open_trade is None and decision in ("ENTER_LONG", "ENTER_SHORT") and qty > 0:
             open_trade = {
                 "ts": ts,
-                "side": side if side in ("long", "short") else ("long" if "LONG" in decision else "short"),
+                "side": (
+                    side
+                    if side in ("long", "short")
+                    else ("long" if "LONG" in decision else "short")
+                ),
                 "entry": close_price,
                 "qty": qty,
             }
@@ -86,4 +90,3 @@ def test_backtest_equity_metrics_match_reporter(baseline_path: Path):
         assert sharpe_na == pytest.approx(float(rep["sharpe"]), rel=0.25, abs=0.25)
     else:
         assert float(rep["sharpe"]) == pytest.approx(0.0, abs=1e-9)
-

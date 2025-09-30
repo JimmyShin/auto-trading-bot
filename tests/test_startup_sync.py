@@ -2,9 +2,9 @@ import math
 
 import pytest
 
-from strategy import DonchianATREngine
-from auto_trading_bot.main import startup_sync, _ensure_protective_stop_on_restart
 import config as cfg
+from auto_trading_bot.main import startup_sync
+from strategy import DonchianATREngine
 
 
 class FakeBroker:
@@ -30,7 +30,9 @@ class FakeBroker:
     def cancel_all(self, symbol: str):
         return None
 
-    def create_stop_market_safe(self, symbol: str, side: str, stop_price: float, amount: float, reduce_only: bool = True):
+    def create_stop_market_safe(
+        self, symbol: str, side: str, stop_price: float, amount: float, reduce_only: bool = True
+    ):
         self._last_stop_calls[symbol] = {
             "side": side,
             "stop_price": float(stop_price),
@@ -61,5 +63,3 @@ def test_startup_sync_sets_entry_and_stop(tmp_path, monkeypatch):
     expected_stop = 200.0 * (1.0 + cfg.EMERGENCY_STOP_FALLBACK_PCT)
     lt = float(st.get("last_trail_stop", 0.0))
     assert lt == pytest.approx(expected_stop, rel=1e-6)
-
-

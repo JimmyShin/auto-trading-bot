@@ -24,16 +24,13 @@ except ModuleNotFoundError:
         Histogram=lambda *args, **kwargs: _DummyMetric(),
         start_http_server=lambda *args, **kwargs: None,
     )
-    sys.modules['prometheus_client'] = prometheus_client
+    sys.modules["prometheus_client"] = prometheus_client
 
 
 import importlib
-from datetime import datetime
 
-import pytest
-
-import config
 import auto_trading_bot.alerts as alerts
+import config
 from auto_trading_bot.reporter import Reporter
 
 

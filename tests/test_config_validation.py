@@ -2,6 +2,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+
 import pytest
 
 
@@ -9,8 +10,10 @@ def reload_config_with(path: Path):
     os.environ["BOT_CONFIG_JSON"] = str(path)
     if "config" in globals():
         import sys as _sys
+
         _sys.modules.pop("config", None)
     import config as cfg
+
     importlib.reload(cfg)
     return cfg
 

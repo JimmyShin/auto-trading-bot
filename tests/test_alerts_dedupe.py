@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from auto_trading_bot.alerts import Alerts, RUNBOOK_HEADER
+from auto_trading_bot.alerts import RUNBOOK_HEADER, Alerts
 from auto_trading_bot.metrics import Metrics
 
 pytestmark = pytest.mark.unit
@@ -44,7 +44,15 @@ def test_alerts_input_always_emitted(caplog):
     inputs = _logs(caplog, "ALERTS_INPUT")
     assert len(inputs) == 1
     payload = inputs[0]
-    assert set(payload.keys()) == {"type", "ts_utc", "dd_ratio", "equity", "peak_equity", "account_mode", "source"}
+    assert set(payload.keys()) == {
+        "type",
+        "ts_utc",
+        "dd_ratio",
+        "equity",
+        "peak_equity",
+        "account_mode",
+        "source",
+    }
     assert payload["dd_ratio"] == pytest.approx(0.05)
     assert payload["equity"] == pytest.approx(1000.0)
     assert payload["peak_equity"] == pytest.approx(1100.0)
@@ -103,7 +111,15 @@ def test_guardrail_dedupe_and_runbook(caplog, monkeypatch):
     guard_logs = _logs(caplog, "GUARDRAIL_TRIP")
     assert len(guard_logs) == 1
     payload = guard_logs[0]
-    assert set(payload.keys()) == {"type", "ts_utc", "guard", "dd_ratio", "threshold", "account_mode", "source"}
+    assert set(payload.keys()) == {
+        "type",
+        "ts_utc",
+        "guard",
+        "dd_ratio",
+        "threshold",
+        "account_mode",
+        "source",
+    }
     assert payload["dd_ratio"] == pytest.approx(0.25)
     assert payload["threshold"] == pytest.approx(0.2)
     assert payload["ts_utc"].endswith("Z")
@@ -111,7 +127,9 @@ def test_guardrail_dedupe_and_runbook(caplog, monkeypatch):
     assert len(called) == 1
     assert called[0] == pytest.approx(0.25)
 
-    runbook_logs = [rec.message for rec in caplog.records if RUNBOOK_HEADER.splitlines()[0] in rec.message]
+    runbook_logs = [
+        rec.message for rec in caplog.records if RUNBOOK_HEADER.splitlines()[0] in rec.message
+    ]
     assert runbook_logs
     assert runbook_logs[0].startswith(RUNBOOK_HEADER.splitlines()[0])
 

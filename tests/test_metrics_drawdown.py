@@ -1,5 +1,6 @@
-import pytest
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from auto_trading_bot.metrics import Metrics
 
@@ -70,7 +71,9 @@ def test_timestamp_validation():
 
     non_utc = timezone(timedelta(hours=9))
     with pytest.raises(ValueError):
-        metrics.update_daily_drawdown(0.1, equity=1000.0, ts=datetime(2025, 1, 1, 12, 0, tzinfo=non_utc))
+        metrics.update_daily_drawdown(
+            0.1, equity=1000.0, ts=datetime(2025, 1, 1, 12, 0, tzinfo=non_utc)
+        )
 
 
 def test_precision_preserved_within_tolerance():

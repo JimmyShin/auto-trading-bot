@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from auto_trading_bot.alerts import Alerts, RUNBOOK_HEADER
+from auto_trading_bot.alerts import RUNBOOK_HEADER, Alerts
 from auto_trading_bot.metrics import Metrics
 from auto_trading_bot.slack_notifier import SlackNotifier
 
@@ -47,10 +47,18 @@ def test_alerts_guardrail_emits_slack(monkeypatch, caplog):
     now = datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc)
     alerts.evaluate(now_utc=now)
 
-    guard_logs = [json.loads(rec.message) for rec in caplog.records if "type" in rec.message and "GUARDRAIL_TRIP" in rec.message]
+    guard_logs = [
+        json.loads(rec.message)
+        for rec in caplog.records
+        if "type" in rec.message and "GUARDRAIL_TRIP" in rec.message
+    ]
     assert guard_logs
 
-    dry_logs = [json.loads(rec.message) for rec in caplog.records if '"type": "SLACK_DRY_RUN"' in rec.message]
+    dry_logs = [
+        json.loads(rec.message)
+        for rec in caplog.records
+        if '"type": "SLACK_DRY_RUN"' in rec.message
+    ]
     assert len(dry_logs) == 1
     text = dry_logs[0]["payload"]["text"]
     assert text.startswith(RUNBOOK_HEADER.splitlines()[0])

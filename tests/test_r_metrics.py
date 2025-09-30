@@ -62,7 +62,9 @@ def test_reporter_metrics_equity_flow(caplog):
     caplog.set_level(logging.INFO, logger="auto_trading_bot.reporter")
     base = datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)
 
-    snap1 = _make_snapshot(ts=base, wallet=Decimal("1000"), margin=Decimal("1000"), available=Decimal("1000"))
+    snap1 = _make_snapshot(
+        ts=base, wallet=Decimal("1000"), margin=Decimal("1000"), available=Decimal("1000")
+    )
     dd1 = reporter.apply_equity_snapshot(snap1, now_utc=base)
     assert dd1 == pytest.approx(0.0, abs=1e-12)
     assert metrics.bot_daily_drawdown() == pytest.approx(0.0, abs=1e-12)
@@ -72,7 +74,15 @@ def test_reporter_metrics_equity_flow(caplog):
     dd_logs = _extract(caplog.records, "DD_CALC")
     assert len(dd_logs) == 1
     payload = dd_logs[0]
-    assert set(payload.keys()) == {"type", "ts_utc", "equity", "peak_equity", "dd_ratio", "source", "account_mode"}
+    assert set(payload.keys()) == {
+        "type",
+        "ts_utc",
+        "equity",
+        "peak_equity",
+        "dd_ratio",
+        "source",
+        "account_mode",
+    }
     assert payload["dd_ratio"] == pytest.approx(0.0)
     assert payload["equity"] == pytest.approx(1000.0)
     assert payload["peak_equity"] == pytest.approx(1000.0)
@@ -151,5 +161,3 @@ def test_decimal_precision(caplog):
     assert payload["equity"] == pytest.approx(float(margin_low), abs=1e-9)
     assert payload["peak_equity"] == pytest.approx(float(margin_peak), abs=1e-9)
     assert payload["ts_utc"].endswith("Z")
-
-

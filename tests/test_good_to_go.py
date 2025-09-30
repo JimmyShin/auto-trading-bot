@@ -1,11 +1,9 @@
 ﻿from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLES_DIR = ROOT / "reporting" / "samples"
@@ -59,7 +57,9 @@ def test_good_to_go_passes_for_healthy_report(tmp_path: Path) -> None:
 
 def test_good_to_go_fails_when_not_enough_trades(tmp_path: Path) -> None:
     out_dir = tmp_path / "reports"
-    report_path = run_report_metrics("limited", out_dir, SAMPLES_DIR / "sample_not_enough_trades.csv")
+    report_path = run_report_metrics(
+        "limited", out_dir, SAMPLES_DIR / "sample_not_enough_trades.csv"
+    )
     result = run_good_to_go(report_path)
     assert result.returncode == 1
     payload = load_artifact(report_path)

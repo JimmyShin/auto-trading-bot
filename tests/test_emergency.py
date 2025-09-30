@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from auto_trading_bot.main import EmergencyManager
+from tests.helpers import FakeStateStore, StubExchange, StubNotifier
 
 
 class DummyExchange:
@@ -43,10 +45,7 @@ class DummyExchange:
                 pos = self.position_for(symbol)
                 try:
                     amt = float(
-                        pos.get("positionAmt")
-                        or pos.get("contracts")
-                        or pos.get("amount")
-                        or 0.0
+                        pos.get("positionAmt") or pos.get("contracts") or pos.get("amount") or 0.0
                     )
                 except Exception:
                     amt = 0.0
@@ -123,7 +122,6 @@ class DummyEngine:
     def clear_position_state(self, symbol: str) -> None:
         entry = self.state.setdefault(symbol, {})
         entry["in_position"] = False
-
 
 def make_manager(
     policy: str,
@@ -250,10 +248,142 @@ def test_kill_switch_triggers_after_repeated_errors():
         return True
 
     manager = make_manager("protect_only", DummyExchange(), DummyEngine(), notifier)
-    manager.record_error('auth')
+    manager.record_error("auth")
     assert manager.should_trigger_kill_switch() is False
-    manager.record_error('auth')
+    manager.record_error("auth")
     assert manager.should_trigger_kill_switch() is True
     manager.execute_cleanup("kill-switch-test", datetime(2024, 1, 1, tzinfo=timezone.utc))
-    assert any("kill-switch-test" in msg for msg in messages)
+    assert any("kill-switch-test" in msg for msg in messages)
 
+
+def _make_guard_manager(*, state_store: FakeStateStore, notifier):
+    exchange = StubExchange(account_mode="live")
+    manager = EmergencyManager(
+        exchange=exchange,
+        engine=DummyEngine(),
+        universe=["BTC/USDT"],
+        notify_callback=lambda msg: True,
+        auto_testnet_on_dd=True,
+        daily_dd_limit=0.05,
+        emergency_policy="protect_only",
+        kill_switch={"auth_failures": 5, "nonce_errors": 5, "max_retries": 5},
+        state_store=state_store,
+        notify_func=notifier,
+    )
+    return manager, exchange
+
+
+def test_guard_dedupe_same_day(monkeypatch):
+    state = FakeStateStore()
+    messages: list[str] = []
+    manager, exchange = _make_guard_manager(
+        state_store=state,
+        notifier=lambda msg: messages.append(msg) or True,
+    )
+
+    now = datetime(2025, 9, 30, 10, 0, tzinfo=timezone.utc)
+    assert manager.handle_daily_drawdown(0.06, now) is True
+    assert exchange.set_testnet_calls == [True]
+    assert messages == [
+        "[EMERGENCY] AUTO_TESTNET_ON_DD triggered → switched to testnet, live entries disabled until UTC reset."
+    ]
+    assert state.get(manager._guard_state_key) == "2025-09-30"
+
+    later_same_day = now + timedelta(hours=2)
+    assert manager.handle_daily_drawdown(0.06, later_same_day) is False
+    assert exchange.set_testnet_calls == [True]
+    assert messages == [
+        "[EMERGENCY] AUTO_TESTNET_ON_DD triggered → switched to testnet, live entries disabled until UTC reset."
+    ]
+
+
+@pytest.mark.parametrize(
+    "delta, expected_triggers",
+    [
+        (timedelta(milliseconds=1), 1),  # same UTC date
+        (timedelta(seconds=1), 2),       # crosses to next UTC date
+    ],
+)
+def test_guard_dedupe_utc_boundary(delta, expected_triggers):
+    state = FakeStateStore()
+    messages: list[str] = []
+    manager, exchange = _make_guard_manager(
+        state_store=state,
+        notifier=lambda msg: messages.append(msg) or True,
+    )
+
+    base = datetime(2025, 9, 30, 23, 59, 59, tzinfo=timezone.utc)
+    assert manager.handle_daily_drawdown(0.06, base) is True
+
+    second_moment = base + delta
+    triggered = manager.handle_daily_drawdown(0.06, second_moment)
+
+    assert len(messages) == expected_triggers
+    assert len(exchange.set_testnet_calls) == expected_triggers
+    if expected_triggers == 2:
+        assert triggered is True
+        assert state.get(manager._guard_state_key) == "2025-10-01"
+    else:
+        assert triggered is False
+
+
+def test_kill_switch_does_not_trigger_below_threshold():
+    events: list[str] = []
+
+    manager = EmergencyManager(
+        exchange=StubExchange(),
+        engine=DummyEngine(),
+        universe=["BTC/USDT"],
+        notify_callback=lambda msg: events.append("notify") or True,
+        auto_testnet_on_dd=False,
+        daily_dd_limit=1.0,
+        emergency_policy="protect_only",
+        kill_switch={"auth_failures": 3, "nonce_errors": 3, "max_retries": 3},
+    )
+
+    manager.record_error("auth")
+    assert manager.should_trigger_kill_switch() is False
+    assert events == []
+    assert manager.kill_switch_triggered is False
+
+
+def test_kill_switch_log_sequence(monkeypatch, caplog):
+    events: list[tuple[str, str | int]] = []
+
+    def notifier(message: str) -> bool:
+        events.append(("notify", message))
+        return True
+
+    manager = EmergencyManager(
+        exchange=StubExchange(),
+        engine=DummyEngine(),
+        universe=["BTC/USDT"],
+        notify_callback=lambda msg: True,
+        auto_testnet_on_dd=False,
+        daily_dd_limit=1.0,
+        emergency_policy="protect_only",
+        kill_switch={"auth_failures": 1, "nonce_errors": 1, "max_retries": 1},
+        notify_func=notifier,
+    )
+
+    manager.record_error("auth")
+
+    def cleanup(reason: str) -> None:
+        events.append(("cleanup", reason))
+
+    logger = logging.getLogger("donchian_bot")
+
+    with caplog.at_level(logging.ERROR, logger="donchian_bot"):
+        with pytest.raises(SystemExit) as excinfo:
+            if manager.should_trigger_kill_switch():
+                logger.error("[kill-switch] triggered")
+                manager.notify("[CRITICAL] Kill-switch activated due to repeated failures -> bot terminated.")
+                cleanup("kill-switch")
+                raise SystemExit(1)
+
+    events.append(("exit", excinfo.value.code))
+
+    assert events[0][0] == "notify"
+    assert events[1] == ("cleanup", "kill-switch")
+    assert events[2] == ("exit", 1)
+    assert any("[kill-switch]" in record.message for record in caplog.records)

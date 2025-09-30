@@ -1,12 +1,13 @@
 from __future__ import annotations
+
 import json
 import logging
-import pytest
-
 import time
 import urllib.request
 
-from auto_trading_bot.metrics import start_metrics_server, get_metrics_manager, dump_current_metrics
+import pytest
+
+from auto_trading_bot.metrics import dump_current_metrics, start_metrics_server
 
 
 def test_metrics_endpoint_exposes_expected_series(monkeypatch, caplog):
@@ -35,11 +36,18 @@ def test_metrics_endpoint_exposes_expected_series(monkeypatch, caplog):
     assert 'bot_trade_count_total{account="test"} 3.0' in body
     assert 'bot_signal_emitted_total{symbol="BTC/USDT",timeframe="1h"} 2.0' in body
     assert 'bot_order_errors_total{account="test",reason="auth"} 1.0' in body
-    assert 'bot_heartbeat_ts' in body
+    assert "bot_heartbeat_ts" in body
 
     metrics_state = dump_current_metrics()
-    assert metrics_state.get('equity') == pytest.approx(1234.5)
-    assert metrics_state.get('daily_dd') == pytest.approx(0.15)
+    assert metrics_state.get("equity") == pytest.approx(1234.5)
+    assert metrics_state.get("daily_dd") == pytest.approx(0.15)
 
-    updates = [json.loads(record.message.split(' ', 1)[1]) for record in caplog.records if record.message.startswith('METRICS_UPDATE ')]
-    assert any(update.get('name') == 'bot_equity' and update.get('value') == pytest.approx(1234.5) for update in updates)
+    updates = [
+        json.loads(record.message.split(" ", 1)[1])
+        for record in caplog.records
+        if record.message.startswith("METRICS_UPDATE ")
+    ]
+    assert any(
+        update.get("name") == "bot_equity" and update.get("value") == pytest.approx(1234.5)
+        for update in updates
+    )

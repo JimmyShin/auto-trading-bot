@@ -73,7 +73,15 @@ def test_apply_equity_snapshot_daily_flow(tmp_path, caplog):
     logs = _dd_logs(caplog.records)
     assert len(logs) == 1
     payload = logs[0]
-    expected_keys = {"type", "ts_utc", "equity", "peak_equity", "dd_ratio", "source", "account_mode"}
+    expected_keys = {
+        "type",
+        "ts_utc",
+        "equity",
+        "peak_equity",
+        "dd_ratio",
+        "source",
+        "account_mode",
+    }
     assert set(payload.keys()) == expected_keys
     assert payload["type"] == "DD_CALC"
     assert payload["equity"] == pytest.approx(1000.0)

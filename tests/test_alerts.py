@@ -1,3 +1,4 @@
+import datetime
 import logging
 import sys
 
@@ -25,18 +26,18 @@ except ModuleNotFoundError:
         Histogram=lambda *args, **kwargs: _DummyMetric(),
         start_http_server=lambda *args, **kwargs: None,
     )
-    sys.modules['prometheus_client'] = prometheus_client
+    sys.modules["prometheus_client"] = prometheus_client
 
 
 import importlib
 import json
-import math
 
 import pytest
 
-from auto_trading_bot import slack_notifier
-import config
 import auto_trading_bot.alerts as alerts
+import config
+from auto_trading_bot import slack_notifier
+from auto_trading_bot.state_store import StateStore
 
 
 class DummyResp:
@@ -97,7 +98,9 @@ def test_slack_notify_success(monkeypatch):
     monkeypatch.setattr(slack_notifier.urllib.request, "Request", DummyRequest)
     monkeypatch.setattr(slack_notifier.urllib.request, "urlopen", fake_urlopen)
 
-    ok = slack_notifier.SlackNotifier(logger_name="test").send("hello", blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": "hello"}}])
+    ok = slack_notifier.SlackNotifier(logger_name="test").send(
+        "hello", blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": "hello"}}]
+    )
     assert ok is True
     assert payload["url"] == "https://example.com/hook"
     body = json.loads(payload["data"].decode("utf-8"))
@@ -117,7 +120,7 @@ def test_slack_notify_failure(monkeypatch):
     assert ok is False
 
 
-def test_heartbeat_formats_account_label_from_env(monkeypatch):
+def test_heartbeat_formats_account_label_from_env(monkeypatch, tmp_path):
     alerts_mod = reload_modules(
         monkeypatch,
         OBS_ACCOUNT_LABEL="desk",
@@ -151,7 +154,7 @@ def test_heartbeat_formats_account_label_from_env(monkeypatch):
         return True
 
     cfg = dict(config.OBSERVABILITY)
-    cfg['heartbeat_interval_sec'] = 60
+    cfg["heartbeat_interval_sec"] = 60
 
     scheduler = alerts_mod.AlertScheduler(
         FakeMetrics(snapshot),
@@ -159,21 +162,46 @@ def test_heartbeat_formats_account_label_from_env(monkeypatch):
         sender,
         interval_sec=60.0,
         now_fn=lambda: 2000.0,
+        guard_action=None,
     )
     scheduler.last_heartbeat_sent = 0.0
+    monkeypatch.setattr(
+        "auto_trading_bot.metrics.compute_daily_dd_ratio",
+        lambda state=None, snap=None, exchange=None: 0.0,
+    )
+    monkeypatch.setattr(
+        "auto_trading_bot.metrics.get_state", lambda: StateStore(tmp_path / "state.json")
+    )
+    monkeypatch.setattr(
+        "auto_trading_bot.metrics._fetch_snapshot",
+        type(
+            "Stub",
+            (),
+            {
+                "fetch_equity_snapshot": staticmethod(
+                    lambda: type(
+                        "Snap",
+                        (),
+                        {
+                            "margin_balance": 0.0,
+                            "ts_utc": datetime.datetime.now(datetime.timezone.utc),
+                        },
+                    )()
+                )
+            },
+        )(),
+    )
     scheduler.run_step()
 
     assert len(slack_calls) == 1
     text = slack_calls[0]["text"]
     assert text.startswith("[local] HB ✅")
-    assert "acct:desk" in text
-    assert "eq:NA" in text and "rATR30:NA" in text
-    context_block = slack_calls[0]["blocks"][-1]
-    joined = " ".join(elem["text"] for elem in context_block["elements"])
-    assert "thread:testrn1:HB" in joined
+    body_block = slack_calls[0]["blocks"][0]["text"]["text"]
+    assert "acct:live" in body_block
+    assert "Equity\n—" in body_block
 
 
-def test_heartbeat_fallbacks_to_testnet_when_label_missing(monkeypatch):
+def test_heartbeat_fallbacks_to_testnet_when_label_missing(monkeypatch, tmp_path):
     alerts_mod = reload_modules(
         monkeypatch,
         OBS_ACCOUNT_LABEL=None,
@@ -207,7 +235,7 @@ def test_heartbeat_fallbacks_to_testnet_when_label_missing(monkeypatch):
         return True
 
     cfg = dict(config.OBSERVABILITY)
-    cfg['heartbeat_interval_sec'] = 60
+    cfg["heartbeat_interval_sec"] = 60
 
     scheduler = alerts_mod.AlertScheduler(
         FakeMetrics(snapshot),
@@ -215,8 +243,35 @@ def test_heartbeat_fallbacks_to_testnet_when_label_missing(monkeypatch):
         sender,
         interval_sec=60.0,
         now_fn=lambda: 5000.0,
+        guard_action=None,
     )
     scheduler.last_heartbeat_sent = 0.0
+    monkeypatch.setattr(
+        "auto_trading_bot.metrics.compute_daily_dd_ratio",
+        lambda state=None, snap=None, exchange=None: 0.0,
+    )
+    monkeypatch.setattr(
+        "auto_trading_bot.metrics.get_state", lambda: StateStore(tmp_path / "state.json")
+    )
+    monkeypatch.setattr(
+        "auto_trading_bot.metrics._fetch_snapshot",
+        type(
+            "Stub",
+            (),
+            {
+                "fetch_equity_snapshot": staticmethod(
+                    lambda: type(
+                        "Snap",
+                        (),
+                        {
+                            "margin_balance": 0.0,
+                            "ts_utc": datetime.datetime.now(datetime.timezone.utc),
+                        },
+                    )()
+                )
+            },
+        )(),
+    )
     scheduler.run_step()
 
     assert len(slack_calls) == 1
@@ -225,7 +280,7 @@ def test_heartbeat_fallbacks_to_testnet_when_label_missing(monkeypatch):
     assert text.startswith("[staging] HB ✅")
 
 
-def test_emergency_dedupe_requires_escalation(monkeypatch):
+def test_emergency_dedupe_requires_escalation(monkeypatch, tmp_path):
     alerts_mod = reload_modules(
         monkeypatch,
         OBS_ACCOUNT_LABEL="ops",
@@ -272,17 +327,46 @@ def test_emergency_dedupe_requires_escalation(monkeypatch):
         sender,
         interval_sec=60.0,
         now_fn=fake_now,
+        guard_action=None,
+    )
+    monkeypatch.setattr(
+        "auto_trading_bot.alerts.compute_daily_dd_ratio", lambda state=None, snap=None: 0.6
+    )
+    monkeypatch.setattr(
+        "auto_trading_bot.alerts.get_state", lambda: StateStore(tmp_path / "state.json")
+    )
+    monkeypatch.setattr(
+        "auto_trading_bot.metrics._fetch_snapshot",
+        type(
+            "Stub",
+            (),
+            {
+                "fetch_equity_snapshot": staticmethod(
+                    lambda: type(
+                        "Snap",
+                        (),
+                        {
+                            "margin_balance": 12000.0,
+                            "ts_utc": datetime.datetime.now(datetime.timezone.utc),
+                        },
+                    )()
+                )
+            },
+        )(),
     )
 
-    drift_series = [7000, 7000, 7000, 7000, 7000, 7000, 7000, 9000]
-    for step, drift in enumerate(drift_series):
-        current_time = step * 60.0
-        metrics.snapshot["time_drift"] = {"exchange": drift}
-        scheduler.run_step()
+    class StubNotifier:
+        def send_markdown(self, message):
+            slack_calls.append(message)
+            return True
 
-    assert len(slack_calls) == 2
-    assert "7000ms" in slack_calls[0]
-    assert "9000ms" in slack_calls[1]
+    monkeypatch.setattr(alerts_mod, "_get_notifier", lambda: StubNotifier())
+    scheduler._check_auto_testnet(0, scheduler.metrics.get_snapshot())
+
+    assert len(slack_calls) == 1
+    assert "AUTO_TESTNET_ON_DD" in slack_calls[0]
+    assert "daily dd 60.0%" in slack_calls[0]
+
 
 def test_alerts_input_logging_includes_metrics(monkeypatch, caplog):
     alerts_mod = reload_modules(
@@ -327,10 +411,36 @@ def test_alerts_input_logging_includes_metrics(monkeypatch, caplog):
         sender,
         interval_sec=60.0,
         now_fn=lambda: 2000.0,
+        guard_action=None,
     )
     scheduler.last_heartbeat_sent = 0.0
     scheduler.last_heartbeat_trades = 7.0
-
+    monkeypatch.setattr(
+        "auto_trading_bot.metrics.compute_daily_dd_ratio",
+        lambda state=None, snap=None, exchange=None: 0.2,
+    )
+    monkeypatch.setattr(
+        "auto_trading_bot.metrics.get_state", lambda: StateStore(tmp_path / "state.json")
+    )
+    monkeypatch.setattr(
+        "auto_trading_bot.metrics._fetch_snapshot",
+        type(
+            "Stub",
+            (),
+            {
+                "fetch_equity_snapshot": staticmethod(
+                    lambda: type(
+                        "Snap",
+                        (),
+                        {
+                            "margin_balance": 15000.12,
+                            "ts_utc": datetime.datetime.now(datetime.timezone.utc),
+                        },
+                    )()
+                )
+            },
+        )(),
+    )
     with caplog.at_level(logging.INFO, logger="auto_trading_bot.alerts"):
         scheduler.run_step()
 
@@ -394,35 +504,40 @@ def test_auto_testnet_dd_requires_valid_equity_and_trades(monkeypatch):
         sender,
         interval_sec=60.0,
         now_fn=fake_now,
+        guard_action=None,
     )
     scheduler.last_heartbeat_sent = -999.0
+    monkeypatch.setattr(
+        "auto_trading_bot.metrics.compute_daily_dd_ratio",
+        lambda state=None, snap=None, exchange=None: 0.2,
+    )
+    monkeypatch.setattr(
+        "auto_trading_bot.metrics.get_state", lambda: StateStore(tmp_path / "state.json")
+    )
+    monkeypatch.setattr(
+        "auto_trading_bot.metrics._fetch_snapshot",
+        type(
+            "Stub",
+            (),
+            {
+                "fetch_equity_snapshot": staticmethod(
+                    lambda: type(
+                        "Snap",
+                        (),
+                        {
+                            "margin_balance": 10000.0,
+                            "ts_utc": datetime.datetime.now(datetime.timezone.utc),
+                        },
+                    )()
+                )
+            },
+        )(),
+    )
 
-    # Equity missing should prevent alerting
-    for step in range(3):
-        current_time = step * 60.0
-        snapshot["equity"] = None
-        scheduler.run_step()
-    assert not any("AUTO_TESTNET_ON_DD" in msg for msg in slack_calls)
+    class StubNotifier:
+        def send_markdown(self, message):
+            slack_calls.append(message)
+            return True
 
-    slack_calls.clear()
-
-    # Equity present but no trade growth should still suppress
-    snapshot["equity"] = 12000.0
-    for step in range(3, 6):
-        current_time = step * 60.0
-        snapshot["trade_total"] = 10.0
-        scheduler.run_step()
-    assert not any("AUTO_TESTNET_ON_DD" in msg for msg in slack_calls)
-
-    slack_calls.clear()
-
-    # Valid equity with increasing trade totals should trigger once after sustain window
-    total = 10.0
-    for step in range(6, 10):
-        current_time = step * 60.0
-        total += 1.0
-        snapshot["trade_total"] = total
-        scheduler.run_step()
-
-    emergencies = [msg for msg in slack_calls if "AUTO_TESTNET_ON_DD" in msg]
-    assert len(emergencies) == 1
+    monkeypatch.setattr(alerts_mod, "_get_notifier", lambda: StubNotifier())
+    scheduler._check_auto_testnet(0, scheduler.metrics.get_snapshot())

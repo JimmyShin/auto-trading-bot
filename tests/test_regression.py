@@ -5,8 +5,8 @@ from typing import Any, Dict, List
 import pandas as pd
 import pytest
 
-from baseline import DEFAULT_BASELINE_PATH, generate_baseline
 from auto_trading_bot.reporter import generate_report
+from baseline import DEFAULT_BASELINE_PATH, generate_baseline
 
 # Mark all tests in this module as regression (slow)
 pytestmark = pytest.mark.regression
@@ -40,7 +40,9 @@ def current_generated(baseline_data: Dict[str, Any], tmp_path_factory) -> Dict[s
     assert symbols, "Baseline has no symbols to validate"
     regen_dir = tmp_path_factory.mktemp("regen_baseline")
     regen_path = regen_dir / "baseline.json"
-    regenerated = generate_baseline(symbols=symbols, timeframe=timeframe, bars=bars, equity=equity, output_path=regen_path)
+    regenerated = generate_baseline(
+        symbols=symbols, timeframe=timeframe, bars=bars, equity=equity, output_path=regen_path
+    )
     return regenerated
 
 
@@ -69,7 +71,11 @@ def _extract_trades_from_records(symbol_records: List[Dict[str, Any]]) -> List[D
         # Detect entry
         if open_trade is None and decision in ("ENTER_LONG", "ENTER_SHORT") and qty > 0:
             open_trade = {
-                "side": side if side in ("long", "short") else ("long" if "LONG" in decision else "short"),
+                "side": (
+                    side
+                    if side in ("long", "short")
+                    else ("long" if "LONG" in decision else "short")
+                ),
                 "entry": close_price,
                 "entry_ts": ts,
                 "qty": qty,
@@ -107,10 +113,14 @@ def _trades_from_baseline(baseline_obj: Dict[str, Any]) -> pd.DataFrame:
 
 
 def test_signals_match_exact(baseline_data: Dict[str, Any], current_generated: Dict[str, Any]):
-    assert current_generated["symbols"] == baseline_data["symbols"], "Signals diverged from baseline"
+    assert (
+        current_generated["symbols"] == baseline_data["symbols"]
+    ), "Signals diverged from baseline"
 
 
-def test_report_metrics_regression(baseline_data: Dict[str, Any], current_generated: Dict[str, Any]):
+def test_report_metrics_regression(
+    baseline_data: Dict[str, Any], current_generated: Dict[str, Any]
+):
     # Current metrics from regenerated decisions -> trades -> reporter.generate_report
     current_trades = _trades_from_baseline(current_generated)
     current_df = generate_report(current_trades)
@@ -148,11 +158,11 @@ def test_report_metrics_regression(baseline_data: Dict[str, Any], current_genera
     }
 
     import math
+
     for key in expected.keys():
         exp = expected[key]
         act = actual[key]
         if math.isinf(exp) or math.isinf(act):
-            assert (math.isinf(exp) and math.isinf(act)), f"Metric {key} mismatch (infinite check)"
+            assert math.isinf(exp) and math.isinf(act), f"Metric {key} mismatch (infinite check)"
         else:
             assert act == pytest.approx(exp, rel=1e-2, abs=1e-2), f"Metric {key} mismatch"
-

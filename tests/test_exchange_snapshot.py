@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from auto_trading_bot.exchange_api import ExchangeAPI, EquitySnapshotError
+from auto_trading_bot.exchange_api import EquitySnapshotError, ExchangeAPI
 
 pytestmark = pytest.mark.unit
 
@@ -86,7 +86,10 @@ def test_fetch_equity_snapshot_success(monkeypatch, caplog):
 
     assert snapshot.account_mode == "testnet"
     assert snapshot.source == "binance-usdm-testnet"
-    assert snapshot.ts_utc.tzinfo is not None and snapshot.ts_utc.tzinfo.utcoffset(snapshot.ts_utc).total_seconds() == 0
+    assert (
+        snapshot.ts_utc.tzinfo is not None
+        and snapshot.ts_utc.tzinfo.utcoffset(snapshot.ts_utc).total_seconds() == 0
+    )
     assert snapshot.wallet_balance == pytest.approx(15182.4314)
     expected_upnl = float(Decimal("12.3456789") + Decimal("0.1000001"))
     assert snapshot.unrealized_pnl == pytest.approx(expected_upnl, abs=1e-9)

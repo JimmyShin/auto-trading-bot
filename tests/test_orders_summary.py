@@ -1,11 +1,10 @@
 import csv
-import os
 from pathlib import Path
 from typing import List
 
 import pytest
 
-from scripts.orders_summary import iter_order_csv_files, summarize_orders, main
+from scripts.orders_summary import iter_order_csv_files, main, summarize_orders
 
 
 def test_iter_order_csv_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -33,11 +32,13 @@ def create_order_csv(path: Path, rows: List[tuple[str, str]]) -> None:
 
 def test_summarize_orders_counts(tmp_path: Path) -> None:
     files = []
-    for idx, rows in enumerate([
-        [("limit", "filled"), ("limit", "filled")],
-        [("limit", "cancelled")],
-        [("market", "filled"), ("market", "filled"), ("market", "filled")],
-    ]):
+    for idx, rows in enumerate(
+        [
+            [("limit", "filled"), ("limit", "filled")],
+            [("limit", "cancelled")],
+            [("market", "filled"), ("market", "filled"), ("market", "filled")],
+        ]
+    ):
         file_path = tmp_path / f"orders_{idx}.csv"
         create_order_csv(file_path, rows)
         files.append(file_path)
@@ -48,7 +49,9 @@ def test_summarize_orders_counts(tmp_path: Path) -> None:
     assert counter[("market", "filled")] == 3
 
 
-def test_main_no_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_main_no_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     monkeypatch.chdir(tmp_path)
@@ -58,7 +61,9 @@ def test_main_no_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: 
     assert output == "No order CSV files found under data/."
 
 
-def test_main_with_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_main_with_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     data_dir = tmp_path / "data"
     nested = data_dir / "nested"
     nested.mkdir(parents=True)
