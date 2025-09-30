@@ -275,6 +275,15 @@ What triggers alerts:
 - Startup and runtime fatal errors (auth/sync failures)
 - Daily trading summary after trade closures (trades, wins/losses, win rate, PF, gross ±%)
 
+## Runbook: Emergency Policies
+
+| Scenario | Detection | Immediate Action | Follow-up / Rollback |
+| --- | --- | --- | --- |
+| Daily drawdown exceeds `DAILY_DD_LIMIT` | Slack alert `AUTO_TESTNET_ON_DD` and metrics `bot_daily_drawdown` | Bot switches to testnet when `AUTO_TESTNET_ON_DD=true`. Verify no live orders; confirm testnet flag in `config.py`/env before resuming. | Restore live trading by setting `AUTO_TESTNET_ON_DD=false` (or reducing drawdown), reset drawdown anchors via `scripts/healthcheck.py --reset-daily`, and re-enable live once equity stabilizes. |
+| Kill-switch tripped (nonce/auth/time drift burst) | Slack `kill-switch activated` message, logs with `event="kill_switch_trigger"` | Investigate underlying API/auth instability. Abort the process and ensure protective stops are in place. | After remediation, clear error counters by restarting with `SAFE_RESTART=true`. Optionally relax knobs via `KILL_SWITCH_*` in `.env` before restart; revert to defaults after stability returns. |
+| Alert dedupe lock persists (no notifications) | Alert logs mention `dedupe_window_expired` but alerts stay muted | Run `python scripts/healthcheck.py --reset-dedupe` to clear the dedupe store. Ensure scheduler resumes emitting heartbeats. | None; dedupe store rebuilds automatically. |
+| Manual rollback needed after config change | Unexpected behaviour post-deploy | Toggle new feature flags `SAFE_CONSOLE_BANNER`/`DAILY_REPORT_ENABLED` to `false` or revert env overrides. Verify baseline tests before re-enabling. | Reapply changes gradually with monitoring, backing them by feature flags for quick disable. |
+
 ### Tools (MCP)
 
 - Extra utilities under `tools/` for MCP integration:
