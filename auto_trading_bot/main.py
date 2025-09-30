@@ -308,11 +308,13 @@ class EmergencyManager:
         kill_switch: Dict[str, Any],
         order_retry_attempts: int = 3,
         order_retry_backoff_sec: float = 1.0,
+        state_store: Optional[Any] = None,
+        notify_func: Optional[Callable[[str], bool]] = None,
     ) -> None:
         self.exchange = exchange
         self.engine = engine
         self.universe = list(universe)
-        self.notify = notify_callback
+        self.notify = notify_func or notify_callback
         self.auto_testnet_on_dd = bool(auto_testnet_on_dd)
         self.daily_dd_limit = float(daily_dd_limit or 0.0)
         self.emergency_policy = (emergency_policy or "protect_only").lower()
@@ -326,6 +328,16 @@ class EmergencyManager:
         self.metrics: Optional[Any] = None
         self.reporter: Optional[Reporter] = None
         self.alerts: Optional[Alerts] = None
+        self._state_store = state_store
+        self._guard_state_key: Optional[str] = None
+        if self._state_store is not None:
+            account_mode = getattr(exchange, "account_mode", None)
+            if callable(account_mode):
+                try:
+                    account_mode = account_mode()
+                except Exception:
+                    account_mode = None
+            self._guard_state_key = f"{(account_mode or 'live')}:emergency.guard_date_utc"
 
     def _next_utc_midnight(self, now: datetime) -> datetime:
         if now.tzinfo is None:
@@ -348,17 +360,27 @@ class EmergencyManager:
         return self.block_entries_until is not None
 
     def handle_daily_drawdown(self, dd_ratio: float, now: datetime) -> bool:
-        self.should_block_entries(now)
+        now_utc = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        now_utc = now_utc.astimezone(timezone.utc)
+        self.should_block_entries(now_utc)
+
+        current_date_iso = now_utc.date().isoformat()
+        if self._state_store is not None and self._guard_state_key is not None:
+            if self._state_store.get(self._guard_state_key) == current_date_iso:
+                return False
+
         if not self.auto_testnet_on_dd or self.auto_testnet_armed:
             return False
         if dd_ratio >= self.daily_dd_limit and self.positions_flat():
             self.auto_testnet_armed = True
-            self.block_entries_until = self._next_utc_midnight(now)
+            self.block_entries_until = self._next_utc_midnight(now_utc)
             self.exchange.set_testnet(True)
             message = "[EMERGENCY] AUTO_TESTNET_ON_DD triggered → switched to testnet, live entries disabled until UTC reset."
             self.notify(message)
             if self.alerts is not None:
-                self.alerts.evaluate(equity=None, peak_equity=None, now_utc=now)
+                self.alerts.evaluate(equity=None, peak_equity=None, now_utc=now_utc)
+            if self._state_store is not None and self._guard_state_key is not None:
+                self._state_store.set(self._guard_state_key, current_date_iso)
             return True
         return False
 
