@@ -3,6 +3,8 @@
   "binance_secret": "YOUR_SECRET",
   "testnet": true,
   "safe_restart": true,
+  "safe_console_banner": false,
+  "daily_report_enabled": false,
   "quote": "USDT",
   "universe": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "AVAX/USDT"],
   "risk_pct": 0.025,

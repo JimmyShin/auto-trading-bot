@@ -65,6 +65,43 @@ eng_global = None
 lock = Lock()
 
 
+def _emit_daily_report(now: datetime, env_label: str, base_dir: str) -> None:
+    if not DAILY_REPORT_ENABLED:
+        return
+    if not _gen_daily_report:
+        logger.warning(
+            "Daily report generation skipped; generator not available",
+            extra={'event': 'daily_report_missing_generator'},
+        )
+        return
+
+    date_str = now.strftime('%Y-%m-%d')
+    try:
+        _out_path, summary = _gen_daily_report(date_str, env_label, base_dir)
+    except Exception as report_exc:
+        logger.warning(
+            "Daily report generation failed: %s",
+            report_exc,
+            extra={'event': 'daily_report_failed'},
+        )
+        return
+
+    try:
+        trades = int(summary.get('trades', 0))
+        wins = int(summary.get('wins', 0))
+        losses = int(summary.get('losses', 0))
+        win_rate = summary.get('win_rate_pct')
+        gross_win = summary.get('gross_win_pct')
+        gross_loss = summary.get('gross_loss_pct')
+        pf = summary.get('profit_factor')
+        slack_notify_safely(
+            f"Daily {env_label} summary {date_str}: trades={trades} wins={wins} losses={losses} "
+            f"win_rate={win_rate}% PF={pf} gross+={gross_win}% gross-={gross_loss}%"
+        )
+    except Exception:
+        pass
+
+
 def align_price(price: float, tick_size: float) -> float:
     if tick_size <= 0:
         return float(price)
@@ -767,11 +804,12 @@ def fetch_df(b: ExchangeAPI, symbol: str, tf: str, lookback: int) -> pd.DataFram
 
 
 def main():
+    startup_mode = 'SAFE' if SAFE_CONSOLE_BANNER else 'LIVE'
     logger.info(
         "Bot startup",
         extra={
             'event': 'startup_banner',
-            'mode': 'SAFE',
+            'mode': startup_mode,
             'tf': TF,
             'risk_pct': RISK_PCT,
             'leverage': LEVERAGE,
@@ -1355,25 +1393,11 @@ def main():
                             except Exception:
                                 pass
                             # Update daily report
-                            try:
-                                if _gen_daily_report:
-                                    date_str = datetime.now().strftime('%Y-%m-%d')
-                                    env_label = 'testnet' if ('TESTNET' in globals() and TESTNET) else 'live'
-                                    base_dir = DATA_BASE_DIR if 'DATA_BASE_DIR' in globals() else 'data'
-                                    out_path, summary = _gen_daily_report(date_str, env_label, base_dir)
-                                    try:
-                                        trades = int(summary.get('trades', 0))
-                                        wins = int(summary.get('wins', 0))
-                                        losses = int(summary.get('losses', 0))
-                                        win_rate = summary.get('win_rate_pct')
-                                        gross_win = summary.get('gross_win_pct')
-                                        gross_loss = summary.get('gross_loss_pct')
-                                        pf = summary.get('profit_factor')
-                                        slack_notify_safely(f"Daily {env_label} summary {date_str}: trades={trades} wins={wins} losses={losses} win_rate={win_rate}% PF={pf} gross+={gross_win}% gross-={gross_loss}%")
-                                    except Exception:
-                                        pass
-                            except Exception:
-                                pass
+                            _emit_daily_report(
+                                datetime.now(),
+                                'testnet' if ('TESTNET' in globals() and TESTNET) else 'live',
+                                DATA_BASE_DIR if 'DATA_BASE_DIR' in globals() else 'data',
+                            )
                         except Exception as e:
                             _log_json(
                                 logger,

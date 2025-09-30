@@ -65,6 +65,8 @@ def get_trading_mode() -> str:
 # Restart behavior
 
 SAFE_RESTART = os.getenv("SAFE_RESTART", "true").lower() == "true"
+SAFE_CONSOLE_BANNER = _coerce_bool(os.getenv("SAFE_CONSOLE_BANNER", "false"))
+DAILY_REPORT_ENABLED = _coerce_bool(os.getenv("DAILY_REPORT_ENABLED", "false"))
 
 
 
@@ -454,6 +456,14 @@ if CONFIG_JSON_PATH.exists():
 
         SAFE_RESTART = _coerce_bool(_json_config['safe_restart'])
 
+    if 'safe_console_banner' in _json_config:
+
+        SAFE_CONSOLE_BANNER = _coerce_bool(_json_config['safe_console_banner'])
+
+    if 'daily_report_enabled' in _json_config:
+
+        DAILY_REPORT_ENABLED = _coerce_bool(_json_config['daily_report_enabled'])
+
     if 'quote' in _json_config:
 
         QUOTE = str(_json_config['quote'])
@@ -649,6 +659,10 @@ def active_config_snapshot() -> Dict[str, Any]:
         "TESTNET": TESTNET,
 
         "SAFE_RESTART": SAFE_RESTART,
+
+        "SAFE_CONSOLE_BANNER": SAFE_CONSOLE_BANNER,
+
+        "DAILY_REPORT_ENABLED": DAILY_REPORT_ENABLED,
 
         "QUOTE": QUOTE,
 

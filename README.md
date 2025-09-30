@@ -109,6 +109,14 @@ Common keys:
 }
 ```
 
+### Feature flags
+
+| Config key | Env var | Default | Description |
+| --- | --- | --- | --- |
+| `safe_restart` | `SAFE_RESTART` | `true` | After restart, flatten or re-arm positions before resuming. |
+| `safe_console_banner` | `SAFE_CONSOLE_BANNER` | `false` | Marks the startup banner as SAFE mode for console visibility. |
+| `daily_report_enabled` | `DAILY_REPORT_ENABLED` | `false` | Emits Slack daily summaries after exits when the generator succeeds; logs warnings if missing or failing. |
+
 ## Safety & Quality
 
 ### Baseline.json regression testing
