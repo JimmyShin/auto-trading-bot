@@ -52,3 +52,7 @@ htmlcov/
 
 # Reports / generated artifacts
 reporting/out/
+
+# etc
+gh.msi
+jq.exe
