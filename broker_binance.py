@@ -178,6 +178,25 @@ class BinanceUSDM:
         order = self.exchange.create_order(symbol, "stop_market", side.lower(), qty, params=params)
         return order
 
+    def create_limit_order(
+        self,
+        symbol: str,
+        side: str,
+        price: float,
+        qty: float,
+        *,
+        reduce_only: bool = False,
+        time_in_force: str | None = "GTC",
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        request: Dict[str, Any] = dict(params or {})
+        if reduce_only:
+            request.setdefault("reduceOnly", True)
+        if time_in_force:
+            request.setdefault("timeInForce", str(time_in_force))
+        order = self.exchange.create_order(symbol, "limit", side.lower(), qty, price, params=request)
+        return order
+
     # ------------------------------------------------------------------
     # Misc helpers
     # ------------------------------------------------------------------

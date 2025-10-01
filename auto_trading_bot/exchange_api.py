@@ -286,6 +286,40 @@ class ExchangeAPI:
 
         return self.client.create_stop_market_safe(symbol, side, stop_price, qty, reduce_only=reduce_only)
 
+    def create_limit_order(
+        self,
+        symbol: str,
+        side: str,
+        price: float,
+        qty: float,
+        *,
+        reduce_only: bool = False,
+        time_in_force: Optional[str] = "GTC",
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        create_fn = getattr(self.client, "create_limit_order", None)
+        if callable(create_fn):
+            return create_fn(
+                symbol,
+                side,
+                price,
+                qty,
+                reduce_only=reduce_only,
+                time_in_force=time_in_force,
+                params=params,
+            )
+
+        exchange = getattr(self.client, "exchange", None)
+        if exchange is None:
+            raise NotImplementedError("Underlying client does not expose limit order support")
+
+        request: Dict[str, Any] = dict(params or {})
+        if reduce_only:
+            request.setdefault("reduceOnly", True)
+        if time_in_force:
+            request.setdefault("timeInForce", str(time_in_force))
+        return exchange.create_order(symbol, "limit", side, qty, price, params=request)
+
 
 
     @staticmethod
