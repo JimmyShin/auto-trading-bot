@@ -99,6 +99,8 @@ jobs:
 
             # --- Deploy using existing compose file (kept for backward compatibility) ---
             cd /opt/auto-trading-bot
+            docker stop auto-trading-bot 2>/dev/null || true
+            docker rm auto-trading-bot 2>/dev/null || true
             docker-compose down
             docker-compose pull
             docker-compose up -d

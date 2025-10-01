@@ -10,7 +10,7 @@ services:
 
   backtest:
     build: .
-    image: auto-trading-bot:latest
+    image: auto-trading-bot:ccxt-fix
     container_name: auto-trading-bot-backtest
     working_dir: /app
     env_file:

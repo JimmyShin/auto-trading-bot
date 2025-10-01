@@ -1,7 +1,7 @@
 services:
   bot:
     # Production: pull pre-built image from GHCR (no builds on server)
-    image: ghcr.io/jimmyshin/auto-trading-bot:latest
+    image: ghcr.io/jimmyshin/auto-trading-bot:ccxt-fix
     container_name: auto-trading-bot
     restart: unless-stopped
     env_file:
