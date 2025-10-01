@@ -56,6 +56,11 @@ jobs:
           docker tag ghcr.io/$REGISTRY_USER/auto-trading-bot:${{ github.sha }} ghcr.io/$REGISTRY_USER/auto-trading-bot:latest
           docker push ghcr.io/$REGISTRY_USER/auto-trading-bot:latest
 
+      - name: Tag & push ccxt-fix
+        run: |
+          docker tag ghcr.io/$REGISTRY_USER/auto-trading-bot:${{ github.sha }} ghcr.io/$REGISTRY_USER/auto-trading-bot:ccxt-fix
+          docker push ghcr.io/$REGISTRY_USER/auto-trading-bot:ccxt-fix
+
   # CD: Deploy on main after image is published
   deploy:
     runs-on: ubuntu-latest
