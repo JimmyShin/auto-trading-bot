@@ -869,12 +869,11 @@ def main():
     except Exception:
         pass
 
-    alerts = get_alert_manager()
-    if alerts is not None:
-        try:
+    try:
+        if alerts is not None:
             alerts.reset_emergency_state()
-        except Exception:
-            pass
+    except Exception:
+        pass
 
     last_equity = 0.0
     try:
