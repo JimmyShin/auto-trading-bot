@@ -1038,10 +1038,24 @@ def main():
 
             for symbol in UNIVERSE:
                 try:
+                    precision_info: Dict[str, Any] = {}
                     precision_fn = getattr(b, 'market_precision', None)
                     if callable(precision_fn):
                         try:
                             precision_info = precision_fn(symbol) or {}
+                        except Exception:
+                            precision_info = {}
+                    if not precision_info:
+                        raw_client = getattr(b, 'raw', None)
+                        try:
+                            if raw_client is not None and hasattr(raw_client, 'market'):
+                                market = raw_client.market(symbol)
+                                precision_info = market.get('precision', {}) or {}
+                                precision_info.update({
+                                    'min_notional': market.get('limits', {}).get('cost', {}).get('min'),
+                                    'tick_size': market.get('limits', {}).get('price', {}).get('min'),
+                                    'step_size': market.get('limits', {}).get('amount', {}).get('min'),
+                                })
                         except Exception:
                             precision_info = {}
 

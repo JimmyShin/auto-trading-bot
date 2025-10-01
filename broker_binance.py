@@ -74,19 +74,19 @@ class BinanceUSDM:
         return self.exchange.fetch_ticker(symbol)
 
     def fapiPrivateGetBalance(self) -> List[Dict[str, Any]]:  # pragma: no cover - passthrough
-        return self.exchange.fapiPrivateGetBalance()
+        return self.exchange.fapiPrivateV2GetBalance()
 
     def fapi_private_get_balance(self) -> List[Dict[str, Any]]:  # ccxt method alias
         return self.fapiPrivateGetBalance()
 
     def fapiPrivateGetAccount(self) -> Dict[str, Any]:  # pragma: no cover
-        return self.exchange.fapiPrivateGetAccount()
+        return self.exchange.fapiPrivateV2GetAccount()
 
     def fapi_private_get_account(self) -> Dict[str, Any]:  # alias for compatibility
         return self.fapiPrivateGetAccount()
 
     def fapiPrivateGetPositionRisk(self) -> List[Dict[str, Any]]:  # pragma: no cover
-        return self.exchange.fapiPrivateGetPositionRisk()
+        return self.exchange.fapiPrivateV2GetPositionRisk()
 
     # ------------------------------------------------------------------
     # Account state API (mirrors methods used by ExchangeAPI)
