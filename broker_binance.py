@@ -86,7 +86,11 @@ class BinanceUSDM:
         return self.fapiPrivateGetAccount()
 
     def fapiPrivateGetPositionRisk(self) -> List[Dict[str, Any]]:  # pragma: no cover
-        return self.exchange.fapiPrivateV2GetPositionRisk()
+        raw_method = getattr(self.exchange, "fapiPrivateV2GetPositionRisk", None)
+        if callable(raw_method):
+            return raw_method()
+        # Fallback in case ccxt renames the method back to camelCase; use raw request
+        return self.exchange.fapiPrivateGetPositionRisk()
 
     # ------------------------------------------------------------------
     # Account state API (mirrors methods used by ExchangeAPI)
@@ -118,7 +122,7 @@ class BinanceUSDM:
         }
 
     def position_for(self, symbol: str) -> Dict[str, Any]:
-        positions = self.exchange.fapiPrivateGetPositionRisk()
+        positions = self.fapiPrivateGetPositionRisk()
         for pos in positions:
             if pos.get("symbol") == symbol.replace("/", ""):
                 return pos
