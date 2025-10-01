@@ -17,6 +17,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 from broker_binance import BinanceUSDM, BalanceAuthError, BalanceSyncError
+from config import BINANCE_KEY, BINANCE_SECRET, TESTNET
 
 __all__ = [
     "ExchangeAPI",
@@ -71,7 +72,9 @@ class ExchangeAPI:
         testnet: Optional[bool] = None,
         source: Optional[str] = None,
     ) -> None:
-        self.client = client or BinanceUSDM()
+        if client is None:
+            client = BinanceUSDM(api_key=BINANCE_KEY, api_secret=BINANCE_SECRET, testnet=TESTNET)
+        self.client = client
         if testnet is not None:
             setattr(self.client, "testnet", bool(testnet))
         self._explicit_source = source

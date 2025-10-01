@@ -73,7 +73,8 @@ def test_backtest_equity_metrics_match_reporter(baseline_path: Path):
     rep = generate_report(trades).iloc[0]
 
     # Backtest equity metrics computed from baseline trades (no fees/slippage to align)
-    curve = equity_curve(trades, fees_bps=0.0, slip_bps=0.0, init_equity=10_000.0)
+    baseline_equity = float(baseline.get("equity") or 10_000.0)
+    curve = equity_curve(trades, fees_bps=0.0, slip_bps=0.0, init_equity=baseline_equity)
     if curve.empty or curve["equity"].nunique() <= 1:
         pytest.skip("Not enough trade equity data to compute metrics")
 

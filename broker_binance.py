@@ -1,16 +1,19 @@
-﻿"""Test stub for Binance USDM client.
+﻿"""Binance USDⓈ-M client adapter backed by ccxt.
 
-This module provides a deterministic in-memory replacement for the real
-``broker_binance`` dependency so unit tests can exercise
-``auto_trading_bot.exchange_api`` without touching the network.  It is *not*
-intended for production use.
+This module provides a thin wrapper used by ``auto_trading_bot.ExchangeAPI`` so the
+rest of the codebase does not depend directly on ccxt.  It replaces the legacy
+in-memory stub so production builds can talk to Binance futures endpoints.
 """
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any, Dict, Iterable, List, Optional
 
-import time
+import ccxt  # type: ignore
+
+logger = logging.getLogger(__name__)
 
 
 class BalanceAuthError(Exception):
@@ -21,19 +24,8 @@ class BalanceSyncError(Exception):
     """Raised when client/server clocks drift beyond an acceptable threshold."""
 
 
-class _MockExchange:
-    """Lightweight helper exposing ``fetch_my_trades`` like ccxt does."""
-
-    def __init__(self, parent: "BinanceUSDM") -> None:
-        self._parent = parent
-
-    def fetch_my_trades(self, symbol: str, limit: int = 5) -> List[Dict[str, Any]]:
-        # Tests only assert that the method exists. Return an empty list.
-        return []
-
-
 class BinanceUSDM:
-    """Very small in-memory stand-in for the real Binance futures client."""
+    """ccxt-backed adapter exposing methods required by ExchangeAPI."""
 
     def __init__(
         self,
@@ -44,99 +36,119 @@ class BinanceUSDM:
         self.api_key = api_key
         self.api_secret = api_secret
         self.testnet = bool(testnet)
-        self._wallet_balance = 10_000.0
-        self._unrealized = 0.0
-        self._positions: Dict[str, Dict[str, Any]] = {}
-        self._prices: Dict[str, float] = {}
-        self.exchange = _MockExchange(self)
+        self.exchange = ccxt.binanceusdm(
+            {
+                "apiKey": api_key,
+                "secret": api_secret,
+                "enableRateLimit": True,
+                "options": {"defaultType": "future"},
+            }
+        )
+        if self.testnet:
+            try:
+                self.exchange.set_sandbox_mode(True)
+            except Exception as exc:  # pragma: no cover - best effort only
+                logger.warning("Failed to enable sandbox mode: %s", exc)
 
     # ------------------------------------------------------------------
     # Lifecycle helpers
     # ------------------------------------------------------------------
     def set_testnet(self, flag: bool) -> bool:
         self.testnet = bool(flag)
+        try:
+            self.exchange.set_sandbox_mode(self.testnet)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("set_sandbox_mode failed: %s", exc)
         return True
 
-    def load_markets(self) -> None:  # pragma: no cover - no external state
-        return None
+    def load_markets(self) -> None:  # pragma: no cover - ccxt handles caching
+        self.exchange.load_markets()
 
     # ------------------------------------------------------------------
     # Market data helpers
     # ------------------------------------------------------------------
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> Iterable[Iterable[Any]]:
-        price = self._prices.get(symbol, 100.0)
-        candles = []
-        for i in range(limit):
-            ts = 1_600_000_000_000 + i * 60_000
-            base = price + i * 0.25
-            candles.append([ts, base, base + 1.0, base - 1.0, base + 0.5, 10.0])
-        return candles
+        return self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
 
     def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
-        price = self._prices.get(symbol, 100.0)
-        return {"symbol": symbol, "last": price, "close": price, "bid": price, "ask": price}
+        return self.exchange.fetch_ticker(symbol)
+
+    def fapiPrivateGetBalance(self) -> List[Dict[str, Any]]:  # pragma: no cover - passthrough
+        return self.exchange.fapiPrivateGetBalance()
+
+    def fapi_private_get_balance(self) -> List[Dict[str, Any]]:  # ccxt method alias
+        return self.fapiPrivateGetBalance()
+
+    def fapiPrivateGetAccount(self) -> Dict[str, Any]:  # pragma: no cover
+        return self.exchange.fapiPrivateGetAccount()
+
+    def fapi_private_get_account(self) -> Dict[str, Any]:  # alias for compatibility
+        return self.fapiPrivateGetAccount()
+
+    def fapiPrivateGetPositionRisk(self) -> List[Dict[str, Any]]:  # pragma: no cover
+        return self.exchange.fapiPrivateGetPositionRisk()
 
     # ------------------------------------------------------------------
     # Account state API (mirrors methods used by ExchangeAPI)
     # ------------------------------------------------------------------
     def get_equity_usdt(self) -> float:
-        return float(self._wallet_balance + self._unrealized)
+        return float(self.exchange.fetch_balance().get("total", {}).get("USDT", 0.0))
 
-    # Convenience aliases required by the prompt
     def get_equity(self) -> float:
         return self.get_equity_usdt()
 
-    def set_equity(self, equity: float) -> None:
-        self._wallet_balance = float(equity)
-        self._unrealized = 0.0
+    def set_equity(self, equity: float) -> None:  # pragma: no cover - not supported via API
+        logger.debug("set_equity called with %s; ignoring (not supported)", equity)
 
-    def set_balance(self, wallet_balance: float, unrealized: float) -> None:
-        self._wallet_balance = float(wallet_balance)
-        self._unrealized = float(unrealized)
+    def set_balance(self, wallet_balance: float, unrealized: float) -> None:  # pragma: no cover
+        logger.debug(
+            "set_balance called with wallet=%s unrealized=%s; ignoring (not supported)",
+            wallet_balance,
+            unrealized,
+        )
 
     def get_balance_snapshot(self) -> Dict[str, Any]:
-        equity = self.get_equity_usdt()
+        balance = self.exchange.fapiPrivateGetAccount()
+        now_ms = int(time.time() * 1000)
         return {
-            "totalWalletBalance": float(self._wallet_balance),
-            "totalUnrealizedProfit": float(self._unrealized),
-            "totalMarginBalance": float(equity),
-            "updateTime": int(time.time() * 1000),
+            "totalWalletBalance": float(balance.get("totalWalletBalance", 0.0)),
+            "totalUnrealizedProfit": float(balance.get("totalUnrealizedProfit", 0.0)),
+            "totalMarginBalance": float(balance.get("totalMarginBalance", 0.0)),
+            "updateTime": int(balance.get("updateTime", now_ms)),
         }
 
     def position_for(self, symbol: str) -> Dict[str, Any]:
-        return dict(self._positions.get(symbol, {}))
+        positions = self.exchange.fapiPrivateGetPositionRisk()
+        for pos in positions:
+            if pos.get("symbol") == symbol.replace("/", ""):
+                return pos
+        return {}
 
     def fetch_positions(self) -> List[Dict[str, Any]]:
-        return [dict(v, symbol=s) for s, v in self._positions.items()]
+        return self.exchange.fetch_positions()
 
     def get_actual_position_size(self, symbol: str) -> float:
-        return float(self._positions.get(symbol, {}).get("positionAmt", 0.0))
+        pos = self.position_for(symbol)
+        try:
+            return float(pos.get("positionAmt", 0.0))
+        except (TypeError, ValueError):
+            return 0.0
 
     def remaining_addable_qty_under_risk_limit(self, symbol: str) -> float:
-        # No risk limits in the stub environment.
-        return float("inf")
+        return float("inf")  # Binance exposes limits but ccxt does not map them 1:1
 
     def close_all_positions(self) -> None:
-        for pos in self._positions.values():
-            pos["positionAmt"] = 0.0
+        self.exchange.cancel_all_orders(symbol=None)
 
     # ------------------------------------------------------------------
     # Order helpers
     # ------------------------------------------------------------------
-    def cancel_all(self, symbol: str) -> None:  # pragma: no cover - no queued orders
-        return None
+    def cancel_all(self, symbol: str) -> None:
+        self.exchange.cancel_all_orders(symbol)
 
     def create_market_order_safe(self, symbol: str, side: str, qty: float) -> Dict[str, Any]:
-        qty = float(qty)
-        side = side.lower()
-        state = self._positions.setdefault(symbol, {"positionAmt": 0.0, "entryPrice": self._prices.get(symbol, 100.0)})
-        amount = float(state.get("positionAmt", 0.0))
-        if side == "buy":
-            amount += qty
-        else:
-            amount -= qty
-        state["positionAmt"] = amount
-        return {"symbol": symbol, "side": side, "amount": qty, "filled": qty}
+        order = self.exchange.create_order(symbol, "market", side.lower(), qty)
+        return order
 
     def create_stop_market_safe(
         self,
@@ -145,27 +157,13 @@ class BinanceUSDM:
         stop_price: float,
         qty: float,
         reduce_only: bool = True,
-    ) -> Dict[str, Any]:  # pragma: no cover - used only for interface compatibility
-        return {
-            "symbol": symbol,
-            "side": side,
-            "stopPrice": stop_price,
-            "amount": qty,
-            "reduce_only": reduce_only,
-        }
+    ) -> Dict[str, Any]:
+        params = {"stopPrice": stop_price, "reduceOnly": reduce_only}
+        order = self.exchange.create_order(symbol, "stop_market", side.lower(), qty, params=params)
+        return order
 
     # ------------------------------------------------------------------
-    # Misc helpers / utilities for tests
+    # Misc helpers
     # ------------------------------------------------------------------
     def fetch_my_trades(self, symbol: str, limit: int = 5) -> List[Dict[str, Any]]:
         return self.exchange.fetch_my_trades(symbol, limit=limit)
-
-    # Simple mutators used by tests -------------------------------------------------
-    def set_price(self, symbol: str, price: float) -> None:
-        self._prices[symbol] = float(price)
-
-    def set_position(self, symbol: str, amount: float, entry_price: Optional[float] = None) -> None:
-        state = self._positions.setdefault(symbol, {})
-        state["positionAmt"] = float(amount)
-        if entry_price is not None:
-            state["entryPrice"] = float(entry_price)
