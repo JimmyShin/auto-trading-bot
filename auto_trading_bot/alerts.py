@@ -60,7 +60,15 @@ def _log_alerts_event(event: str, payload: Dict[str, Any]) -> None:
         logger.info("%s %s", event, body)
 
 SENTINEL_EXIT_PRICES = {200.25, 200.2500, 0.0}
-EMERGENCY_MIN_WINDOW_SEC = 180.0
+def _emergency_window_seconds() -> float:
+    try:
+        value = float(os.getenv("EMERGENCY_ALERT_WINDOW_SEC", "180"))
+    except (TypeError, ValueError):
+        value = 180.0
+    return max(0.0, min(value, 1800.0))
+
+
+EMERGENCY_MIN_WINDOW_SEC = _emergency_window_seconds()
 RUN_ID_LENGTH = 7
 
 
@@ -784,6 +792,9 @@ class AlertScheduler(threading.Thread):
                 self.last_heartbeat_trades = trade_total_val
         elif trade_total_val is not None:
             self.last_heartbeat_trades = trade_total_val
+
+    def reset_emergency_state(self) -> None:
+        self.emergencies.clear()
     def _reset_emergency(self, event_type: str) -> None:
         key = f"{event_type}:{CONTEXT.account_label}"
         state = self.emergencies.get(key)

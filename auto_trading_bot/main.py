@@ -869,6 +869,13 @@ def main():
     except Exception:
         pass
 
+    alerts = get_alert_manager()
+    if alerts is not None:
+        try:
+            alerts.reset_emergency_state()
+        except Exception:
+            pass
+
     last_equity = 0.0
     try:
         snap = b.fetch_equity_snapshot()
