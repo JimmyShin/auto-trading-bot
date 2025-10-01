@@ -86,11 +86,23 @@ class BinanceUSDM:
         return self.fapiPrivateGetAccount()
 
     def fapiPrivateGetPositionRisk(self) -> List[Dict[str, Any]]:  # pragma: no cover
-        raw_method = getattr(self.exchange, "fapiPrivateV2GetPositionRisk", None)
-        if callable(raw_method):
-            return raw_method()
-        # Fallback in case ccxt renames the method back to camelCase; use raw request
-        return self.exchange.fapiPrivateGetPositionRisk()
+        v2_methods = (
+            "fapiPrivateV2GetPositionRisk",
+            "fapiPrivateV2_get_positionrisk",
+        )
+        for name in v2_methods:
+            raw_method = getattr(self.exchange, name, None)
+            if callable(raw_method):
+                return raw_method()
+
+        # As a final fallback hit the V2 endpoint via the raw request helper
+        try:
+            return self.exchange.fapiPrivateV2Get("/fapi/v2/positionRisk")
+        except AttributeError:
+            pass
+
+        # No V2 helper available; surface a clear error so callers can react
+        raise RuntimeError("ccxt client does not expose /fapi/v2/positionRisk")
 
     # ------------------------------------------------------------------
     # Account state API (mirrors methods used by ExchangeAPI)
