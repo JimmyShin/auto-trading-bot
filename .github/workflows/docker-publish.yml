@@ -124,3 +124,18 @@ jobs:
             echo "Container failed to become healthy. Showing recent logs:" >&2
             docker logs --since 2m --tail 200 auto-trading-bot || true
             exit 1
+
+      - name: Signal graceful restart intent
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          script: |
+            set -euo pipefail
+            cd /opt/auto-trading-bot
+            if [ -f venv/bin/activate ]; then
+              . venv/bin/activate
+            fi
+            export RESTART_INTENT_PATH=${RESTART_INTENT_PATH:-/opt/auto-trading-bot/data/restart_intent.json}
+            python -m auto_trading_bot.restart mark --mode graceful --ttl 900 || true

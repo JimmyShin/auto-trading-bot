@@ -22,6 +22,7 @@ from indicators import atr, is_near_funding
 from auto_trading_bot.reporter import Reporter
 from auto_trading_bot.alerts import Alerts, slack_notify_safely, slack_notify_exit, start_alert_scheduler
 from auto_trading_bot.metrics import Metrics, start_metrics_server, get_metrics_manager
+from auto_trading_bot.restart import consume_restart_intent
 from slack_notify import notify_emergency
 
 try:
@@ -783,17 +784,39 @@ def emergency_cleanup(reason: str = "manual") -> None:
                 {'event': 'emergency_cleanup_failed', 'reason': reason, 'error': str(exc)},
             )
     else:
-        _rearm_protective_stops(b_global, eng_global)
+        if not _graceful_shutdown_requested:
+            _rearm_protective_stops(b_global, eng_global)
 
 
 def signal_handler(signum, frame):
+    _mark_shutdown_graceful(f"signal:{signum}")
     emergency_cleanup("signal")
     os._exit(0)
 
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
-atexit.register(lambda: emergency_cleanup("atexit"))
+_graceful_shutdown_requested = False
+
+
+def _mark_shutdown_graceful(sender: str) -> None:
+    global _graceful_shutdown_requested
+    _graceful_shutdown_requested = True
+    _log_json(
+        logger,
+        logging.INFO,
+        {"event": "graceful_shutdown_requested", "sender": sender},
+    )
+
+
+def _atexit_cleanup() -> None:
+    if _graceful_shutdown_requested:
+        _log_json(logger, logging.INFO, {"event": "graceful_shutdown_skip", "reason": "graceful"})
+        return
+    emergency_cleanup("atexit")
+
+
+atexit.register(_atexit_cleanup)
 
 
 def fetch_df(b: ExchangeAPI, symbol: str, tf: str, lookback: int) -> pd.DataFrame:
@@ -817,6 +840,19 @@ def main():
         },
     )
 
+    intent = consume_restart_intent()
+    if intent is not None:
+        _mark_shutdown_graceful("startup-consume")
+        _log_json(
+            logger,
+            logging.INFO,
+            {
+                "event": "restart_intent_consumed",
+                "mode": intent.mode,
+                "created_at": intent.created_at.isoformat(),
+            },
+        )
+
     metrics_port = int(OBSERVABILITY.get("metrics_port", 9108))
     account_label = str(OBSERVABILITY.get("account_label", "live"))
     metrics_mgr = start_metrics_server(metrics_port, account_label)
@@ -838,6 +874,13 @@ def main():
         emergency_policy=EMERGENCY_POLICY,
         kill_switch=KILL_SWITCH,
     )
+    if intent is not None and intent.mode == "graceful":
+        emergency_mgr.emergency_policy = "protect_only"
+        _log_json(
+            logger,
+            logging.INFO,
+            {"event": "emergency_policy_override", "policy": "protect_only"},
+        )
     global emergency_manager
     emergency_manager = emergency_mgr
 
@@ -898,6 +941,9 @@ def main():
 
     # On startup, re-arm protective stops and sync state for any existing positions
     try:
+        if intent is not None and intent.mode == "graceful":
+            logger.info("Graceful restart: skipping protective rearm on startup", extra={'event': 'startup_skip_rearm'})
+        else:
         startup_sync(b, eng)
         logger.info("Trading loop starting", extra={'event': 'loop_start'})
     except BalanceAuthError as auth_err:

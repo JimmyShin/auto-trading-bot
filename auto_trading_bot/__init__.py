@@ -22,5 +22,12 @@ def __getattr__(name: str):
         from .main import EmergencyManager
 
         return EmergencyManager
+    if name in ("mark_restart_intent", "consume_restart_intent"):
+        from .restart import mark_restart_intent, consume_restart_intent
+
+        return {
+            "mark_restart_intent": mark_restart_intent,
+            "consume_restart_intent": consume_restart_intent,
+        }[name]
     raise AttributeError(f"module 'auto_trading_bot' has no attribute {name!r}")
 
