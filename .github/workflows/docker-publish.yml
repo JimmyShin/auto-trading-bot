@@ -95,12 +95,16 @@ jobs:
           script: |
             set -euo pipefail
             cd /opt/auto-trading-bot
-            if [ -f venv/bin/activate ]; then
+            PY_BIN="python3"
+            if [ -x venv/bin/python ]; then
+              PY_BIN="venv/bin/python"
+            elif [ -f venv/bin/activate ]; then
               . venv/bin/activate
+              PY_BIN="python"
             fi
             export RESTART_INTENT_PATH=${RESTART_INTENT_PATH:-/opt/auto-trading-bot/data/restart_intent.json}
             export RESTART_INTENT_SKIP_TTL=${RESTART_INTENT_SKIP_TTL:-600}
-            python -m auto_trading_bot.restart mark --mode graceful --ttl 900
+            "$PY_BIN" -m auto_trading_bot.restart mark --mode graceful --ttl 900
             ls -l "$RESTART_INTENT_PATH"
 
       - name: Deploy to droplet via SSH
