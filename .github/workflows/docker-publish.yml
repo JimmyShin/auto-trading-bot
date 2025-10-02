@@ -99,6 +99,7 @@ jobs:
               . venv/bin/activate
             fi
             export RESTART_INTENT_PATH=${RESTART_INTENT_PATH:-/opt/auto-trading-bot/data/restart_intent.json}
+            export RESTART_INTENT_SKIP_TTL=${RESTART_INTENT_SKIP_TTL:-600}
             python -m auto_trading_bot.restart mark --mode graceful --ttl 900 || true
 
       - name: Deploy to droplet via SSH
