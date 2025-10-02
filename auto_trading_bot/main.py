@@ -22,7 +22,7 @@ from indicators import atr, is_near_funding
 from auto_trading_bot.reporter import Reporter
 from auto_trading_bot.alerts import Alerts, slack_notify_safely, slack_notify_exit, start_alert_scheduler
 from auto_trading_bot.metrics import Metrics, start_metrics_server, get_metrics_manager
-from auto_trading_bot.restart import consume_restart_intent
+from auto_trading_bot.restart import consume_restart_intent, peek_restart_intent
 from slack_notify import notify_emergency
 
 try:
@@ -776,6 +776,24 @@ def emergency_cleanup(reason: str = "manual") -> None:
     manager = emergency_manager
     if manager:
         try:
+            metrics_mgr = get_metrics_manager()
+            if metrics_mgr is not None:
+                snapshot = metrics_mgr.get_snapshot()
+                eq = snapshot.get("equity")
+                if eq is not None:
+                    metrics_mgr.set_equity(eq)
+                dd_val = snapshot.get("daily_dd")
+                if dd_val is not None:
+                    metrics_mgr.set_daily_drawdown(dd_val)
+                avg_r_val = snapshot.get("avg_r")
+                if avg_r_val is not None:
+                    metrics_mgr.set_avg_r(avg_r_val)
+                trades_delta_val = snapshot.get("trades_delta")
+                if trades_delta_val is not None:
+                    metrics_mgr.set_trades_delta(trades_delta_val)
+                window_trades_val = snapshot.get("window_trades")
+                if window_trades_val is not None:
+                    metrics_mgr.set_window_trades(window_trades_val)
             manager.execute_cleanup(reason, datetime.now(timezone.utc))
         except Exception as exc:
             _log_json(
@@ -788,10 +806,31 @@ def emergency_cleanup(reason: str = "manual") -> None:
             _rearm_protective_stops(b_global, eng_global)
 
 
+def _should_skip_signal_emergency(signum: int) -> bool:
+    if signum != signal.SIGTERM:
+        return False
+    intent = peek_restart_intent(ttl_seconds=5)
+    if intent is None:
+        return False
+    logger.info(
+        "Suppressing emergency cleanup on SIGTERM due to restart intent",
+        extra={"event": "signal_skip_emergency", "mode": intent.mode},
+    )
+    return True
+
+
 def signal_handler(signum, frame):
-    _mark_shutdown_graceful(f"signal:{signum}")
-    emergency_cleanup("signal")
-    os._exit(0)
+    sender = f"signal:{signum}"
+    _mark_shutdown_graceful(sender)
+    try:
+            if _should_skip_signal_emergency(signum):
+                emergency_mgr = emergency_manager
+                if emergency_mgr is not None:
+                    emergency_mgr.emergency_policy = "protect_only"
+                return
+            emergency_cleanup("signal")
+    finally:
+        os._exit(0)
 
 
 signal.signal(signal.SIGINT, signal_handler)
