@@ -944,7 +944,7 @@ def main():
         if intent is not None and intent.mode == "graceful":
             logger.info("Graceful restart: skipping protective rearm on startup", extra={'event': 'startup_skip_rearm'})
         else:
-        startup_sync(b, eng)
+            startup_sync(b, eng)
         logger.info("Trading loop starting", extra={'event': 'loop_start'})
     except BalanceAuthError as auth_err:
         logger.error('Startup protective stop auth error: %s', auth_err)
