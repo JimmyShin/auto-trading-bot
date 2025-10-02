@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 - Wired LIVE-only DD emergency path to TradingMode + StateStore, refreshed heartbeat formatting with en dash fallbacks, extended Prometheus exports/tests.
+- Added `exit_reason_code` logging metadata and auto/system/manual tagging support (schema v5).
 
 ## [0.2.0] - 2025-09-26
 

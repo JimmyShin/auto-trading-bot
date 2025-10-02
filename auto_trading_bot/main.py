@@ -1440,7 +1440,14 @@ def main():
                                     pnl_pct = ((entry_px - exit_price_used) / entry_px) * 100.0
                             else:
                                 pnl_pct = 0.0
-                            log_exit(symbol, side_state, exit_price_used, pnl_pct, reason_lab)
+                            log_exit(
+                                symbol,
+                                side_state,
+                                exit_price_used,
+                                pnl_pct,
+                                reason_lab,
+                                reason_code="system_forced",
+                            )
                             # Update state: record structural reset on stop or clear on profit/flat
                             try:
                                 if pnl_pct < -0.5:

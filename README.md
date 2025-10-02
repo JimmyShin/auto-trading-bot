@@ -393,3 +393,7 @@ Additional metrics introduced in this release:
 - `order_latency_seconds{account,kind}` is a histogram (seconds) with buckets `0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10` capturing per-order latency observations.
 - Structured logs on the `donchian_bot` logger obey `LOG_LEVEL` (defaults to `INFO`); set `LOG_LEVEL=DEBUG` for verbose JSON payloads.
 
+### Manual Exit Logging
+
+- Use `python -m scripts.manual_close <args>` to record manual closures; trades log with `exit_reason_code=manual_close` for downstream filtering.
+

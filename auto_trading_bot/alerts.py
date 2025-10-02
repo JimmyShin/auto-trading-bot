@@ -479,6 +479,7 @@ def slack_notify_exit(
     fill_source: str = "exchange",
     fees_quote: Optional[float] = None,
     sender: Optional[Callable[..., bool]] = None,
+    reason_code: str = "auto_exit",
 ) -> bool:
     """Send a Slack message about a confirmed exit."""
     global _EXIT_EQUITY_WARNED
@@ -593,6 +594,10 @@ def slack_notify_exit(
                 {
                     "type": "mrkdwn",
                     "text": f"AvgR30:{_format_decimal(avg_metrics.get('avg_r_atr'), 2)}",
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": f"reason_code:{reason_code}",
                 },
             ],
         },
@@ -1099,6 +1104,9 @@ class Alerts:
     ) -> None:
         now = self._now_utc(now_utc)
         dd_ratio = self._dd_ratio()
+
+        if self._account_mode != TradingMode.LIVE.value:
+            return
 
         payload_input = {
             "type": "ALERTS_INPUT",

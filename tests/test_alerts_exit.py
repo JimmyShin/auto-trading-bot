@@ -103,7 +103,15 @@ def test_slack_notify_exit_posts_blocks_for_valid_fill(tmp_path, monkeypatch):
         fallback_pct=0.01,
         risk_usdt_planned=10.0,
     )
-    reporter.log_exit("BTC/USDT", "short", 180.0, 10.0, fees_quote_actual=0.5)
+    reporter.log_exit(
+        "BTC/USDT",
+        "short",
+        180.0,
+        10.0,
+        reason="exit",
+        reason_code="auto_exit",
+        fees_quote_actual=0.5,
+    )
 
     calls = []
 
@@ -121,6 +129,7 @@ def test_slack_notify_exit_posts_blocks_for_valid_fill(tmp_path, monkeypatch):
         pnl_pct=10.0,
         equity_usdt=10000.0,
         sender=sender,
+        reason_code="auto_exit",
     )
 
     assert ok is True

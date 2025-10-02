@@ -53,7 +53,7 @@ def _log_report_metrics(payload: Dict[str, Any]) -> None:
 __all__ = ["Reporter", "generate_report", "save_report"]
 
 # RAW trades CSV schema version (append-only schema). Bump on column changes.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class Reporter:
@@ -177,6 +177,7 @@ class Reporter:
             "exit_price",
             "pnl_pct",
             "exit_reason",
+            "exit_reason_code",
             # Ex-post
             "fees_quote_actual",
             "pnl_quote_expost",
@@ -242,6 +243,7 @@ class Reporter:
                 "exit_price": "",
                 "pnl_pct": "",
                 "exit_reason": "",
+                "exit_reason_code": "",
                 # ex-post (empty at entry)
                 "fees_quote_actual": "",
                 "pnl_quote_expost": "",
@@ -267,7 +269,17 @@ class Reporter:
         except Exception as exc:
             print(f"[WARN] trade log failed: {exc}")
 
-    def log_exit(self, symbol: str, side: str, exit_price: float, pnl_pct: float, reason: str = "exit", *, fees_quote_actual: Optional[float] = None) -> None:
+    def log_exit(
+        self,
+        symbol: str,
+        side: str,
+        exit_price: float,
+        pnl_pct: float,
+        reason: str = "exit",
+        *,
+        reason_code: str = "auto_exit",
+        fees_quote_actual: Optional[float] = None,
+    ) -> None:
         ts = self._now_str()
         date = self._now_str("%Y-%m-%d")
         filename = os.path.join(self._root_dir(), f"trades_{date}.csv")
@@ -291,6 +303,7 @@ class Reporter:
                             "exit_price": exit_price,
                             "pnl_pct": pnl_pct,
                             "exit_reason": reason,
+                            "exit_reason_code": reason_code,
                         }
                     )
                 return
@@ -346,6 +359,7 @@ class Reporter:
                             "exit_price": exit_price,
                             "pnl_pct": pnl_pct,
                             "exit_reason": reason,
+                            "exit_reason_code": reason_code,
                             "fees_quote_actual": fees if fees != 0 else (row.get("fees_quote_actual") or ""),
                             "pnl_quote_expost": pnl_quote_expost if pnl_quote_expost != 0 else (row.get("pnl_quote_expost") or ""),
                             "R_atr_expost": r_atr,
