@@ -106,26 +106,7 @@ jobs:
             export RESTART_INTENT_SKIP_TTL=${RESTART_INTENT_SKIP_TTL:-600}
             export RESTART_INTENT_MODE=${RESTART_INTENT_MODE:-graceful}
             export RESTART_INTENT_TTL=${RESTART_INTENT_TTL:-900}
-            "$PY_BIN" - <<'PY'
-import json
-import os
-from datetime import datetime, timezone
-from pathlib import Path
-
-path = Path(os.environ["RESTART_INTENT_PATH"])
-mode = os.environ.get("RESTART_INTENT_MODE", "graceful")
-ttl = int(os.environ.get("RESTART_INTENT_TTL", "900"))
-
-intent = {
-    "created_at": datetime.now(timezone.utc).isoformat(),
-    "mode": mode,
-    "ttl": ttl,
-}
-
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(intent), encoding="utf-8")
-print(json.dumps(intent))
-PY
+            "$PY_BIN" -c "import json, os; from datetime import datetime, timezone; from pathlib import Path; path = Path(os.environ['RESTART_INTENT_PATH']); mode = os.environ.get('RESTART_INTENT_MODE', 'graceful'); ttl = int(os.environ.get('RESTART_INTENT_TTL', '900')); intent = {'created_at': datetime.now(timezone.utc).isoformat(), 'mode': mode, 'ttl': ttl}; path.parent.mkdir(parents=True, exist_ok=True); path.write_text(json.dumps(intent), encoding='utf-8'); print(json.dumps(intent))"
             ls -l "$RESTART_INTENT_PATH"
 
       - name: Deploy to droplet via SSH
