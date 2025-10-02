@@ -1105,9 +1105,6 @@ class Alerts:
         now = self._now_utc(now_utc)
         dd_ratio = self._dd_ratio()
 
-        if self._account_mode != TradingMode.LIVE.value:
-            return
-
         payload_input = {
             "type": "ALERTS_INPUT",
             "ts_utc": now.isoformat().replace("+00:00", "Z"),
@@ -1118,6 +1115,8 @@ class Alerts:
             "source": self._source,
         }
         self._logger.info(json.dumps(payload_input, sort_keys=True, default=_safe_json_value))
+
+        live_mode = self._account_mode == TradingMode.LIVE.value
 
         if dd_ratio < self._dd_threshold:
             return
@@ -1144,8 +1143,16 @@ class Alerts:
         )
         message = f"{RUNBOOK_HEADER}\n\n{body}"
         self._logger.info(message)
+
         notifier = _get_notifier()
-        notifier.send_markdown(message)
+        should_notify = live_mode or getattr(notifier, "_dry", False)
+        if should_notify:
+            notifier.send_markdown(message)
+        else:
+            self._logger.info(
+                "Skipping AUTO_TESTNET_ON_DD Slack send in %s mode (dry-run disabled)",
+                self._account_mode,
+            )
 
         if self._guard_action is not None:
             try:
