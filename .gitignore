@@ -56,3 +56,6 @@ reporting/out/
 # etc
 gh.msi
 jq.exe
+
+# archive
+archive/manual_trades/
