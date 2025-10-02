@@ -23,6 +23,8 @@ from auto_trading_bot.reporter import Reporter
 from auto_trading_bot.alerts import Alerts, slack_notify_safely, slack_notify_exit, start_alert_scheduler
 from auto_trading_bot.metrics import Metrics, start_metrics_server, get_metrics_manager
 from auto_trading_bot.restart import consume_restart_intent, peek_restart_intent
+RESTART_INTENT_SKIP_TTL = int(os.getenv("RESTART_INTENT_SKIP_TTL", "120"))
+
 from slack_notify import notify_emergency
 
 try:
@@ -809,12 +811,16 @@ def emergency_cleanup(reason: str = "manual") -> None:
 def _should_skip_signal_emergency(signum: int) -> bool:
     if signum != signal.SIGTERM:
         return False
-    intent = peek_restart_intent(ttl_seconds=5)
+    intent = peek_restart_intent(ttl_seconds=RESTART_INTENT_SKIP_TTL)
     if intent is None:
         return False
     logger.info(
         "Suppressing emergency cleanup on SIGTERM due to restart intent",
-        extra={"event": "signal_skip_emergency", "mode": intent.mode},
+        extra={
+            "event": "signal_skip_emergency",
+            "mode": intent.mode,
+            "ttl_sec": RESTART_INTENT_SKIP_TTL,
+        },
     )
     return True
 
