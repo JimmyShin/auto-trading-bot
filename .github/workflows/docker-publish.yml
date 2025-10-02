@@ -102,6 +102,7 @@ jobs:
               . venv/bin/activate
               PY_BIN="python"
             fi
+            export PYTHONPATH="/opt/auto-trading-bot:${PYTHONPATH:-}"
             export RESTART_INTENT_PATH=${RESTART_INTENT_PATH:-/opt/auto-trading-bot/data/restart_intent.json}
             export RESTART_INTENT_SKIP_TTL=${RESTART_INTENT_SKIP_TTL:-600}
             "$PY_BIN" -m auto_trading_bot.restart mark --mode graceful --ttl 900
