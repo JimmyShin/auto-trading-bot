@@ -31,6 +31,9 @@ class DonchianATRStrategy(Strategy):
         self._cooldown_remaining: int = 0
 
     def on_bar(self, bar: Dict[str, Any], state: Dict[str, Any]) -> Signal:
+        if not bar and not state:
+            return Signal(side="neutral", strength=0.0, meta={"reason": "stub"})
+
         df = self._extract_history(bar)
         required = max(DONCHIAN_LEN, ATR_LEN)
         if df is None or len(df) < required:
