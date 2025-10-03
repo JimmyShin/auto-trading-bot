@@ -1,0 +1,16 @@
+# Strategy History
+
+## 2025-? : Donchian + ATR Prototype
+- Combined Donchian channel breakouts with ATR-based filtering and risk controls.
+- Produced sparse signals and stalled live testing cadence.
+- Retained engine scaffolding for state management and risk orchestration.
+
+## 2025-? : MA Cross Downgrade (Current Default)
+- Temporarily shifted to a 5/20 moving-average cross to restore signal frequency.
+- Strategy is now registered as `ma_cross_5_20` and wired through the strategy registry.
+- Registry allows swapping strategies via the `STRATEGY_NAME` config/ENV without touching the main loop.
+
+## Roadmap
+- Re-introduce Donchian+ATR as `donchian_atr` strategy once signal density improves.
+- Coexistence handled by the registry; both strategies can be toggled per environment.
+- Future work: share risk pipeline while allowing bespoke entry logic per strategy module.

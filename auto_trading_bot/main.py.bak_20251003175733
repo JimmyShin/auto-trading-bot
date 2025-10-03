@@ -20,7 +20,6 @@ from auto_trading_bot.exchange_api import ExchangeAPI, BalanceAuthError, Balance
 from strategy import DonchianATREngine
 from auto_trading_bot.strategy import Signal, get_strategy
 import auto_trading_bot.strategy.ma_cross  # noqa: F401 - ensure default strategy registered
-import auto_trading_bot.strategy.donchian_atr  # noqa: F401 - ensure stub registered
 from indicators import atr, is_near_funding
 from auto_trading_bot.reporter import Reporter
 from auto_trading_bot.alerts import Alerts, slack_notify_safely, slack_notify_exit, start_alert_scheduler

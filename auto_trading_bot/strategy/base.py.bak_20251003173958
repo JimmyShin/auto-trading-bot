@@ -1,0 +1,54 @@
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any, Dict, Type, Callable, Optional
+
+
+@dataclass(frozen=True)
+class Signal:
+    side: str
+    strength: float = 0.0
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+
+class Strategy(ABC):
+    @abstractmethod
+    def on_bar(self, bar: Dict[str, Any], state: Dict[str, Any]) -> Signal:
+        """Produce a trading signal for the provided bar and mutable state."""
+
+
+_StrategyFactory = Type[Strategy]
+_REGISTRY: Dict[str, _StrategyFactory] = {}
+
+
+def register_strategy(name: str, cls: Optional[Type[Strategy]] = None):
+    """Register a strategy class under the provided name."""
+    if not isinstance(name, str) or not name:
+        raise ValueError("Strategy name must be a non-empty string")
+
+    def decorator(strategy_cls: Type[Strategy]) -> Type[Strategy]:
+        if not issubclass(strategy_cls, Strategy):
+            raise TypeError("Registered strategy must inherit from Strategy")
+        if name in _REGISTRY:
+            raise ValueError(f"Strategy '{name}' already registered")
+        _REGISTRY[name] = strategy_cls
+        return strategy_cls
+
+    if cls is not None:
+        return decorator(cls)
+    return decorator
+
+
+def get_strategy(name: str, *args: Any, **kwargs: Any) -> Strategy:
+    """Instantiate and return a registered strategy by name."""
+    try:
+        strategy_cls = _REGISTRY[name]
+    except KeyError as exc:
+        raise KeyError(f"Strategy '{name}' is not registered") from exc
+    return strategy_cls(*args, **kwargs)
+
+
+def available_strategies() -> Dict[str, Type[Strategy]]:
+    """Return a shallow copy of the registry for introspection/tests."""
+    return dict(_REGISTRY)

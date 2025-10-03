@@ -48,7 +48,7 @@ def save_state(state: Dict, path: Optional[str] = None):
             raise last_err
 
 class DonchianATREngine:
-    """Legacy engine coordinating MA cross entries with ATR-based risk controls (formerly Donchian/ATR)."""
+    """Deterministic Donchian/ATR engine combining MA crossover signals with ATR-based risk controls."""
     def __init__(self, state_path: Optional[str] = None, persist_state: bool = True, initial_state: Optional[Dict] = None, risk_manager: Optional[RiskManager] = None):
         self.state_path = state_path or STATE_FILE
         self._persist_state = persist_state

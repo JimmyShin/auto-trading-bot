@@ -1,0 +1,16 @@
+# Strategy History
+
+## Sep 2025 — Donchian + ATR Prototype
+- Combined Donchian channel breakouts with ATR-based filtering and risk controls.
+- Produced sparse signals in forward tests, which slowed feedback loops and regression coverage.
+- Kept the engine scaffolding for risk coordination and state persistence.
+
+## Oct 2025 — MA Cross Downgrade (Current Default)
+- Downgraded to a 5/20 moving-average cross to regain signal cadence while keeping risk rules stable.
+- Registered as `ma_cross_5_20` within the strategy registry and loaded by default via `STRATEGY_NAME`.
+- Registry lets operators override the active strategy through configuration or environment variables without touching the main loop.
+
+## Roadmap
+- Re-introduce the Donchian+ATR logic as `donchian_atr` once signal density targets are hit.
+- Maintain co-existence by sharing the risk engine while isolating entry logic per strategy module.
+- Expand tests to cover strategy selection paths and regression baselines for each plugin.

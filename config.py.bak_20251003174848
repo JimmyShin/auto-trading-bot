@@ -149,8 +149,6 @@ TF = "1h"
 
 LOOKBACK = 400
 
-STRATEGY_NAME = "ma_cross_5_20"
-
 STATE_FILE = "state.json"
 STATE_STORE_PATH = os.getenv("STATE_STORE_PATH", STATE_FILE)
 
