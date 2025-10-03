@@ -31,4 +31,3 @@ class StubNotifier:
     def send(self, message: str) -> bool:
         self.messages.append(message)
         return True
-
