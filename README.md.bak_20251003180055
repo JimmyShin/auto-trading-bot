@@ -7,7 +7,6 @@ Modular, test‑driven crypto trading bot with risk management, deterministic si
 - Project goal: build a dependable, modular trading bot protected by tests and reproducible baselines.
 - Key features:
   - Strategy module producing deterministic signals for regression testing.
-  - Strategy registry defaulting to a 5/20 MA cross plugin (Donchian+ATR stub kept for future reactivation).
   - Risk management for sizing, stops, pyramiding, structural resets, and daily loss limits.
   - Exchange API wrapper to isolate third‑party dependencies.
   - Reporter for logging trades/signals and generating analytics (DataFrame + Excel).
@@ -17,7 +16,7 @@ Modular, test‑driven crypto trading bot with risk management, deterministic si
 
 ### strategy.py
 
-- Engine: `class DonchianATREngine(persist_state: bool = True, initial_state: dict | None = None, risk_manager: RiskManager | None = None)` (houses risk/state pipeline while strategy selection happens via registry).
+- Engine: `class DonchianATREngine(persist_state: bool = True, initial_state: dict | None = None, risk_manager: RiskManager | None = None)`
 - Responsibilities: deterministic signal generation, entry planning, state persistence, daily risk anchors.
 - Key methods:
   - `reset_daily_anchor(equity: float) -> None`
