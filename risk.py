@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from typing import Any, Dict, Optional
+import logging
 
 import pandas as pd
 
@@ -15,6 +16,8 @@ from config import (
     get_position_cap,
 )
 
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["RiskManager"]
 
@@ -102,16 +105,29 @@ class RiskManager:
 
         final_min_qty = max(min_qty, min_qty_by_notional)
         if 0 < qty < final_min_qty:
-            print(
-                f"[RISK] qty {qty:.6f} below min order {final_min_qty:.6f}; adjusted to exchange minimum",
+            logger.info(
+                "Risk qty below exchange minimum; adjusting",
+                extra={
+                    "event": "risk_qty_floor",
+                    "symbol": symbol,
+                    "qty": float(qty),
+                    "min_qty": float(final_min_qty),
+                },
             )
             qty = final_min_qty
 
         position_cap = get_position_cap(equity_usdt)
         max_qty_by_cap = position_cap / max(price, 1e-9)
         if qty > max_qty_by_cap:
-            print(
-                f"[RISK] qty {qty:.6f} exceeds cap ${position_cap:.0f}; trimmed to {max_qty_by_cap:.6f}",
+            logger.info(
+                "Risk qty exceeds position cap; trimming",
+                extra={
+                    "event": "risk_qty_cap",
+                    "symbol": symbol,
+                    "qty": float(qty),
+                    "position_cap": float(position_cap),
+                    "trimmed_qty": float(max_qty_by_cap),
+                },
             )
             qty = max_qty_by_cap
 
@@ -203,8 +219,14 @@ class RiskManager:
                         last_price,
                         add_ratio,
                     )
-                    print(
-                        f"[RISK] {symbol} pyramid trigger reached at +{profit_r:.1f}R",
+                    logger.info(
+                        "Pyramid trigger reached",
+                        extra={
+                            "event": "pyramid_trigger",
+                            "symbol": symbol,
+                            "profit_r": float(profit_r),
+                            "level": int(symbol_state.get("pyramid_level", 0)),
+                        },
                     )
 
         self.state[symbol] = symbol_state
@@ -284,8 +306,13 @@ class RiskManager:
         reset_conditions = self.check_reset_conditions(symbol, df, last_stop)
         if reset_conditions["qualified"]:
             last_stop["reset_qualified"] = True
-            print(
-                f"[RISK] {symbol} structural reset satisfied: {', '.join(reset_conditions['reasons'])}",
+            logger.info(
+                "Structural reset qualified",
+                extra={
+                    "event": "structural_reset",
+                    "symbol": symbol,
+                    "reasons": list(reset_conditions['reasons']),
+                },
             )
 
         symbol_state["last_stop_loss"] = last_stop
@@ -401,5 +428,12 @@ class RiskManager:
 
             return None
         except Exception as exc:
-            print(f"[RISK] sync_position_state failed for {symbol}: {exc}")
+            logger.warning(
+                "Failed to sync position state",
+                extra={
+                    "event": "sync_position_state_failed",
+                    "symbol": symbol,
+                    "error": str(exc),
+                },
+            )
             return None
