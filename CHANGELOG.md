@@ -4,6 +4,16 @@
 - Wired LIVE-only DD emergency path to TradingMode + StateStore, refreshed heartbeat formatting with en dash fallbacks, extended Prometheus exports/tests.
 - Added `exit_reason_code` logging metadata and auto/system/manual tagging support (schema v5).
 
+
+## v0.5.0 — Strategy pluginization (S1–S7)
+- S1: Introduce Strategy interface and registry
+- S2: Formalize MA (5/20) strategy as a plugin
+- S3: Wire registry into main loop + default STRATEGY_NAME
+- S4: Add Donchian+ATR stub (coexistence proof)
+- S5: Document strategy history (current default = MA cross)
+- S6: Comment/naming hygiene (no logic changes)
+- S7: Full test suite green (79 passed)
+
 ## [0.2.0] - 2025-09-26
 
 ### Added
