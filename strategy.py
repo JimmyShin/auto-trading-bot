@@ -48,11 +48,7 @@ def save_state(state: Dict, path: Optional[str] = None):
             raise last_err
 
 class DonchianATREngine:
-    """
-    15분봉 MA크로스 전략
-    - 5/20MA 크로스오버 신호
-    - ATR 기반 사이징/손절/트레일
-    """
+    """Deterministic Donchian/ATR engine combining MA crossover signals with ATR-based risk controls."""
     def __init__(self, state_path: Optional[str] = None, persist_state: bool = True, initial_state: Optional[Dict] = None, risk_manager: Optional[RiskManager] = None):
         self.state_path = state_path or STATE_FILE
         self._persist_state = persist_state
@@ -77,20 +73,20 @@ class DonchianATREngine:
         return self._risk.hit_daily_loss_limit(equity)
 
     def detect_signal(self, df: pd.DataFrame) -> Dict:
-        """이동평균 정렬 + 창구 시그널 + 캔들 위치 리스크 조정"""
+        """Build MA crossover signal enriched with candle-position filters and risk multipliers."""
         from indicators import ma_crossover_signal
         signal = ma_crossover_signal(df, fast_period=5, slow_period=20)
         
-        # 캔들 위치 분석
+        # Evaluate candle positioning
         candle_analysis = self.get_candle_position_analysis(df)
         candle_safe_long = self.is_safe_candle_position(df, "long")
         candle_safe_short = self.is_safe_candle_position(df, "short")
         
-        # 신호 결정 (정렬 기반)
-        base_long = signal["long"]  # 이제 정렬 기반
-        base_short = signal["short"]  # 이제 정렬 기반
+        # Base signals from the MA crossover
+        base_long = signal["long"]  # raw crossover output
+        base_short = signal["short"]  # raw crossover output
         
-        # 리스크 승수 계산 (캔들 위치 기반)
+        # Adjust risk by candle position safety
         long_risk_multiplier = 1.0 if candle_safe_long else 0.5
         short_risk_multiplier = 1.0 if candle_safe_short else 0.5
         
@@ -100,7 +96,7 @@ class DonchianATREngine:
             "fast_ma": signal["fast_ma"],
             "slow_ma": signal["slow_ma"],
             "regime": signal["regime"],
-            "alignment": signal["alignment"],  # 정렬 상태 정보 추가
+            "alignment": signal["alignment"],  # expose MA alignment details
             "risk_multiplier": {
                 "long": long_risk_multiplier,
                 "short": short_risk_multiplier
@@ -229,53 +225,50 @@ class DonchianATREngine:
         return out
     
     def is_safe_candle_position(self, df: pd.DataFrame, direction: str) -> bool:
-        """캔들 내 위치 기반 안전 진입 확인"""
+        """Return True when the latest candle supports entering in the given direction."""
         if len(df) < 1:
             return False
-            
+
         candle = df.iloc[-1]
-        current_price = float(candle['close'])
-        candle_high = float(candle['high'])  
-        candle_low = float(candle['low'])
+        current_price = float(candle["close"])
+        candle_high = float(candle["high"])
+        candle_low = float(candle["low"])
         candle_range = candle_high - candle_low
-        
-        # 캔들 범위가 너무 작으면 통과 (안전)
+
+        # If the candle is flat, treat it as safe by default
         if candle_range == 0:
             return True
-            
-        # 현재가의 캔들 내 위치 계산 (0=저가, 1=고가)
+
+        # Normalise position within the candle (0=low, 1=high)
         position_ratio = (current_price - candle_low) / candle_range
-        
+
         if direction == "long":
-            # 롱: 캔들 하위 70% 구간에서만 진입 허용 (상위 30% 금지)
             return position_ratio < float(CANDLE_LONG_MAX_POS_RATIO)
-        else:  # short
-            # 숏: 캔들 상위 70% 구간에서만 진입 허용 (하위 30% 금지)  
-            return position_ratio > float(CANDLE_SHORT_MIN_POS_RATIO)
-    
+        # direction == "short"
+        return position_ratio > float(CANDLE_SHORT_MIN_POS_RATIO)
+
     def get_candle_position_analysis(self, df: pd.DataFrame) -> dict:
-        """캔들 위치 분석 정보 반환"""
+        """Summarise candle position metrics used by the entry filters."""
         if len(df) < 1:
             return {"position_ratio": 0, "range": 0, "filter_reason": "no_data"}
-            
+
         candle = df.iloc[-1]
-        current_price = float(candle['close'])
-        candle_high = float(candle['high'])
-        candle_low = float(candle['low'])
+        current_price = float(candle["close"])
+        candle_high = float(candle["high"])
+        candle_low = float(candle["low"])
         candle_range = candle_high - candle_low
-        
+
         if candle_range == 0:
             return {"position_ratio": 0.5, "range": 0, "filter_reason": "zero_range"}
-            
+
         position_ratio = (current_price - candle_low) / candle_range
-        
-        # 필터링 이유 분석
+
+        # Label extreme positions for logging transparency
         filter_reason = "safe"
         if position_ratio > 0.7:
             filter_reason = f"too_high_{position_ratio:.2f}"
         elif position_ratio < 0.3:
             filter_reason = f"too_low_{position_ratio:.2f}"
-            
         return {
             "position_ratio": round(position_ratio, 3),
             "range": round(candle_range, 2),
