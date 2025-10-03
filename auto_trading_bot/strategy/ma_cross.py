@@ -6,6 +6,7 @@ import pandas as pd
 
 from indicators import ma_crossover_signal
 from auto_trading_bot.strategy.base import Signal, Strategy, register_strategy
+from auto_trading_bot.strategy.utils import strategy_tags
 
 
 @register_strategy("ma_cross_5_20")
@@ -22,22 +23,34 @@ class MovingAverageCrossStrategy(Strategy):
 
     def on_bar(self, bar: Dict[str, Any], state: Dict[str, Any]) -> Signal:
         history = self._extract_history(bar)
+        params = {"fast_period": self.fast_period, "slow_period": self.slow_period}
+        tags = strategy_tags("ma_cross_5_20", "1", params)
         if history is None:
-            return Signal(side="neutral", strength=0.0, meta={"reason": "missing_history"})
+            meta = {"reason": "missing_history"}
+            meta.update(tags)
+            return Signal(side="neutral", strength=0.0, meta=meta)
         if len(history) < self.slow_period:
-            return Signal(side="neutral", strength=0.0, meta={"reason": "insufficient_history"})
+            meta = {"reason": "insufficient_history"}
+            meta.update(tags)
+            return Signal(side="neutral", strength=0.0, meta=meta)
 
         analysis = ma_crossover_signal(history, fast_period=self.fast_period, slow_period=self.slow_period)
 
         if analysis.get("long"):
             state["ma_cross_last"] = {"analysis": analysis, "side": "long"}
-            return Signal(side="long", strength=1.0, meta={"analysis": analysis})
+            meta = {"analysis": analysis}
+            meta.update(tags)
+            return Signal(side="long", strength=1.0, meta=meta)
         if analysis.get("short"):
             state["ma_cross_last"] = {"analysis": analysis, "side": "short"}
-            return Signal(side="short", strength=1.0, meta={"analysis": analysis})
+            meta = {"analysis": analysis}
+            meta.update(tags)
+            return Signal(side="short", strength=1.0, meta=meta)
 
         state["ma_cross_last"] = {"analysis": analysis, "side": "neutral"}
-        return Signal(side="neutral", strength=0.0, meta={"analysis": analysis, "reason": "no_signal"})
+        meta = {"analysis": analysis, "reason": "no_signal"}
+        meta.update(tags)
+        return Signal(side="neutral", strength=0.0, meta=meta)
 
     @staticmethod
     def _extract_history(bar: Dict[str, Any]) -> pd.DataFrame | None:

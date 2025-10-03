@@ -75,6 +75,7 @@ class Reporter:
         self._logger = logging.getLogger(logger_name)
         self._daily_peak_equity: Dict[str, float] = {}
         self._last_dd_ratio: float = 0.0
+        self._pending_strategy_tags: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_config(cls, *, metrics: Optional[Any] = None) -> Reporter:
@@ -82,6 +83,9 @@ class Reporter:
 
         env = "testnet" if TESTNET else "live"
         return cls(DATA_BASE_DIR, env, metrics=metrics)
+
+    def apply_strategy_tags(self, tags: Optional[Dict[str, Any]]) -> None:
+        self._pending_strategy_tags = dict(tags) if tags else None
 
     def apply_equity_snapshot(
         self,
@@ -186,6 +190,10 @@ class Reporter:
             # Legacy compat
             "risk_usdt",
             "R_multiple",
+            "strategy_name",
+            "strategy_version",
+            "strategy_params_hash",
+            "strategy_params",
         ]
 
     def log_trade(
@@ -254,6 +262,14 @@ class Reporter:
                 "R_multiple": "",
             }
         )
+        tags = self._pending_strategy_tags or {}
+        row["strategy_name"] = tags.get("strategy_name", "")
+        row["strategy_version"] = tags.get("strategy_version", "")
+        row["strategy_params_hash"] = tags.get("strategy_params_hash", "")
+        params_payload = tags.get("strategy_params")
+        self._pending_strategy_tags = None
+        row["strategy_params"] = json.dumps(params_payload, sort_keys=True) if params_payload is not None else ""
+
 
         try:
             with open(filename, "a", encoding="utf-8", newline="") as handle:
@@ -266,6 +282,7 @@ class Reporter:
                     except Exception:
                         row["risk_usdt"] = risk_usdt
                 writer.writerow(row)
+            self._pending_strategy_tags = None
         except Exception as exc:
             print(f"[WARN] trade log failed: {exc}")
 
@@ -635,6 +652,12 @@ class Reporter:
         ma_diff_pct = ((float(fast_ma) / float(slow_ma) - 1) * 100.0) if slow_ma else 0.0
         regime = signal.get("regime", "UNKNOWN")
         reasons_str = "|".join(reasons_list) if reasons_list else ""
+        tags = self._pending_strategy_tags or {}
+        strategy_name = tags.get("strategy_name", "")
+        strategy_version = tags.get("strategy_version", "")
+        strategy_params_hash = tags.get("strategy_params_hash", "")
+        params_payload = tags.get("strategy_params")
+        strategy_params_json = json.dumps(params_payload, sort_keys=True) if params_payload is not None else ""
         be_promotion_price = float(entry_price) + (1.5 * float(atr_abs)) if str(side).upper().startswith("LONG") else float(entry_price) - (1.5 * float(atr_abs))
         expected_trail_range = (
             f"${entry_price:.0f} ~ ${be_promotion_price + (2.5 * atr_abs):.0f}"
@@ -675,6 +698,10 @@ class Reporter:
                             "reason",
                             "entry_logic",
                             "reasons",
+                            "strategy_name",
+                            "strategy_version",
+                            "strategy_params_hash",
+                            "strategy_params",
                         ]
                     )
                 writer.writerow(
@@ -701,8 +728,13 @@ class Reporter:
                         reason,
                         entry_logic,
                         reasons_str,
+                        strategy_name,
+                        strategy_version,
+                        strategy_params_hash,
+                        strategy_params_json,
                     ]
                 )
+            self._pending_strategy_tags = None
         except Exception as exc:
             print(f"[WARN] detailed entry log failed: {exc}")
 

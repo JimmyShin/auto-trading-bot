@@ -14,6 +14,7 @@ from config import (
     REENTRY_COOLDOWN_BARS,
 )
 from auto_trading_bot.strategy.base import Signal, Strategy, register_strategy
+from auto_trading_bot.strategy.utils import strategy_tags
 
 
 @dataclass
@@ -32,19 +33,28 @@ class DonchianATRStrategy(Strategy):
 
     def on_bar(self, bar: Dict[str, Any], state: Dict[str, Any]) -> Signal:
         if not bar and not state:
-            return Signal(side="neutral", strength=0.0, meta={"reason": "stub"})
+            tags = self._build_tags()
+            meta = {"reason": "stub"}
+            meta.update(tags)
+            return Signal(side="neutral", strength=0.0, meta=meta)
 
         df = self._extract_history(bar)
         required = max(DONCHIAN_LEN, ATR_LEN)
         if df is None or len(df) < required:
-            return Signal(side="neutral", strength=0.0, meta={"reason": "insufficient_history"})
+            tags = self._build_tags()
+            meta = {"reason": "insufficient_history"}
+            meta.update(tags)
+            return Signal(side="neutral", strength=0.0, meta=meta)
 
         df = df.astype(float)
         snapshot = self._compute_donchian(df)
         atr_abs = self._compute_atr(df)
 
         if snapshot is None or atr_abs is None:
-            return Signal(side="neutral", strength=0.0, meta={"reason": "insufficient_buffers"})
+            tags = self._build_tags()
+            meta = {"reason": "insufficient_buffers"}
+            meta.update(tags)
+            return Signal(side="neutral", strength=0.0, meta=meta)
 
         close = float(df["close"].iloc[-1])
         atr_pct = atr_abs / close if close else 0.0
@@ -55,6 +65,7 @@ class DonchianATRStrategy(Strategy):
         cooldown_max = getattr(self, "_rcd_max", None)
         if cooldown_max is None:
             cooldown_max = REENTRY_COOLDOWN_BARS
+        tags = self._build_tags(gate, cooldown_max)
 
         state[f"donch_high_{DONCHIAN_LEN}"] = snapshot.high
         state[f"donch_low_{DONCHIAN_LEN}"] = snapshot.low
@@ -109,6 +120,7 @@ class DonchianATRStrategy(Strategy):
             "reasons": reasons,
             "exits": exits,
         }
+        meta.update(tags)
 
         return Signal(side=side, strength=1.0 if side != "neutral" else 0.0, meta=meta)
 
@@ -174,3 +186,18 @@ class DonchianATRStrategy(Strategy):
         window_len = min(ATR_LEN, len(tr) - 1) if len(tr) > 1 else 1
         atr_series = tr.tail(window_len) if window_len > 0 else tr.tail(1)
         return float(atr_series.mean()) if not atr_series.empty else None
+
+    def _build_tags(self, gate: Optional[float] = None, cooldown_max: Optional[int] = None) -> Dict[str, Any]:
+        if gate is None:
+            gate = getattr(self, "_atr_gate", ATR_GATE)
+        if cooldown_max is None:
+            cooldown_max = getattr(self, "_rcd_max", REENTRY_COOLDOWN_BARS)
+        params = {
+            "donchian_len": DONCHIAN_LEN,
+            "atr_len": ATR_LEN,
+            "atr_gate": gate,
+            "midline_exit": MIDLINE_EXIT,
+            "band_exit": BAND_EXIT,
+            "cooldown_bars": cooldown_max,
+        }
+        return strategy_tags("donchian_atr", "1", params)

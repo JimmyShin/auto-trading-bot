@@ -19,6 +19,7 @@ from config import *  # TF, RISK_PCT, LEVERAGE, UNIVERSE, SAFE_RESTART, ATR_LEN,
 from auto_trading_bot.exchange_api import ExchangeAPI, BalanceAuthError, BalanceSyncError
 from strategy import DonchianATREngine
 from auto_trading_bot.strategy import Signal, get_strategy
+from auto_trading_bot.strategy.utils import extract_strategy_tags
 import auto_trading_bot.strategy.ma_cross  # noqa: F401 - ensure default strategy registered
 import auto_trading_bot.strategy.donchian_atr  # noqa: F401 - ensure stub registered
 from indicators import atr, is_near_funding
@@ -1225,6 +1226,8 @@ def main():
                         )
                         signal = Signal(side="neutral", strength=0.0, meta={"error": str(sig_err)})
 
+                    strategy_tags_payload = extract_strategy_tags(getattr(signal, "meta", {}) or {})
+
                     plan = eng.make_entry_plan(
                         symbol=symbol,
                         df=df,
@@ -1237,6 +1240,14 @@ def main():
                         daily_loss_hit=daily_loss_hit,
                     )
                     if isinstance(plan, dict):
+                        plan.setdefault("strategy_tags", strategy_tags_payload or {})
+                        if strategy_tags_payload:
+                            for tag_key, tag_value in strategy_tags_payload.items():
+                                if tag_key == "strategy_params":
+                                    continue
+                                plan.setdefault(tag_key, tag_value)
+                            if "strategy_params" in strategy_tags_payload:
+                                plan.setdefault("strategy_params", strategy_tags_payload["strategy_params"])
                         plan.setdefault(
                             "plugin_signal",
                             {
@@ -1278,24 +1289,27 @@ def main():
                         rmult = (sig or {}).get('risk_multiplier', {}) or {}
                         rmL = rmult.get('long', 1.0)
                         rmS = rmult.get('short', 1.0)
+                        payload = {
+                            'event': 'bar',
+                            'symbol': symbol,
+                            'ts': bar_ts.isoformat(),
+                            'close': round(close, 4),
+                            'atr': round(atr_abs, 4),
+                            'fast_ma': round(fast_ma, 4),
+                            'slow_ma': round(slow_ma, 4),
+                            'ma_diff_pct': round(ma_diff_pct, 4),
+                            'pos_ratio': round(pos_ratio, 4),
+                            'rm_long': rmL,
+                            'rm_short': rmS,
+                            'decision': dec,
+                            'skip_reason': sk,
+                        }
+                        if strategy_tags_payload:
+                            payload.update(strategy_tags_payload)
                         _log_json(
                             logger,
                             logging.INFO,
-                            {
-                                'event': 'bar',
-                                'symbol': symbol,
-                                'ts': bar_ts.isoformat(),
-                                'close': round(close, 4),
-                                'atr': round(atr_abs, 4),
-                                'fast_ma': round(fast_ma, 4),
-                                'slow_ma': round(slow_ma, 4),
-                                'ma_diff_pct': round(ma_diff_pct, 4),
-                                'pos_ratio': round(pos_ratio, 4),
-                                'rm_long': rmL,
-                                'rm_short': rmS,
-                                'decision': dec,
-                                'skip_reason': sk,
-                            },
+                            payload,
                         )
 
                     # Manage trailing stop if in position
@@ -1347,22 +1361,29 @@ def main():
                                             # logs
                                             reason_tag = f"PYRAMID_L{pyr_level}"
                                             side_tag = f"{side.upper()}_ADD"
+                                            if strategy_tags_payload:
+                                                reporter.apply_strategy_tags(strategy_tags_payload)
                                             log_trade(symbol, side_tag, close, eff_add, reason_tag)
                                             try:
                                                 sig_for_add = plan.get('signal', {})
+                                                if strategy_tags_payload:
+                                                    reporter.apply_strategy_tags(strategy_tags_payload)
                                                 log_detailed_entry(symbol, side_tag, close, eff_add, new_trail, 1.0, sig_for_add, atr_abs, eq, reason_tag, ['pyramid_trigger'])
                                             except Exception:
                                                 pass
+                                            payload = {
+                                                'event': 'pyramid_add',
+                                                'symbol': symbol,
+                                                'level': pyr_level,
+                                                'qty': round(eff_add, 6),
+                                                'price': round(close, 4),
+                                            }
+                                            if strategy_tags_payload:
+                                                payload.update(strategy_tags_payload)
                                             _log_json(
                                                 logger,
                                                 logging.INFO,
-                                                {
-                                                    'event': 'pyramid_add',
-                                                    'symbol': symbol,
-                                                    'level': pyr_level,
-                                                    'qty': round(eff_add, 6),
-                                                    'price': round(close, 4),
-                                                },
+                                                payload,
                                             )
                                             levels_add = compute_tp_ladder(close, side, eff_add)
                                             place_tp_ladder(
@@ -1383,14 +1404,17 @@ def main():
                                             except Exception:
                                                 pass
                                         except Exception as _pe:
+                                            payload = {
+                                                'event': 'pyramid_add_failed',
+                                                'symbol': symbol,
+                                                'error': str(_pe),
+                                            }
+                                            if strategy_tags_payload:
+                                                payload.update(strategy_tags_payload)
                                             _log_json(
                                                 logger,
                                                 logging.WARNING,
-                                                {
-                                                    'event': 'pyramid_add_failed',
-                                                    'symbol': symbol,
-                                                    'error': str(_pe),
-                                                },
+                                                payload,
                                             )
                         except Exception:
                             pass
@@ -1620,4 +1644,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
