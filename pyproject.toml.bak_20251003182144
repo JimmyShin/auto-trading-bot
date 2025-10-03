@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auto-trading-bot"
+version = "0.1.0"
+description = "Automated trading bot with CI/CD, metrics, and emergency controls"
+requires-python = ">=3.10"
+authors = [{name="Auto Trading Bot Team"}]
+license = {text = "Proprietary"}
+dependencies = [
+    "ccxt==4.3.75",
+    "jsonschema==4.23.0",
+    "numpy==1.26.4",
+    "pandas==2.2.2",
+    "prometheus-client==0.20.0",
+    "python-dotenv==1.0.1",
+    "PyYAML==6.0.2",
+    "requests==2.32.3"
+]
+
+[tool.setuptools]
+packages = ["auto_trading_bot"]
