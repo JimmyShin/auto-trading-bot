@@ -1,7 +1,5 @@
 import pytest
 
-import auto_trading_bot.strategy.donchian_atr  # noqa: F401
-
 from auto_trading_bot.strategy.base import (
     Signal,
     Strategy,
@@ -38,12 +36,3 @@ def test_missing_strategy_raises_key_error():
 def test_available_strategies_exposes_registry():
     names = available_strategies().keys()
     assert "dummy_registry_strategy" in names
-
-
-def test_donchian_stub_returns_neutral():
-    strat = get_strategy("donchian_atr")
-    result = strat.on_bar({}, {})
-
-    assert isinstance(result, Signal)
-    assert result.side == "neutral"
-    assert result.meta.get("reason") == "stub"
