@@ -18,8 +18,6 @@ import pandas as pd
 from config import *  # TF, RISK_PCT, LEVERAGE, UNIVERSE, SAFE_RESTART, ATR_LEN, POLL_SEC, DATA_BASE_DIR, TESTNET
 from auto_trading_bot.exchange_api import ExchangeAPI, BalanceAuthError, BalanceSyncError
 from strategy import DonchianATREngine
-from auto_trading_bot.strategy import Signal, get_strategy
-import auto_trading_bot.strategy.ma_cross  # noqa: F401 - ensure default strategy registered
 from indicators import atr, is_near_funding
 from auto_trading_bot.reporter import Reporter
 from auto_trading_bot.alerts import Alerts, slack_notify_safely, slack_notify_exit, start_alert_scheduler
@@ -909,31 +907,6 @@ def main():
     b = ExchangeAPI()
     b.connect()
     eng = DonchianATREngine()
-
-    strategy_name = os.getenv("STRATEGY_NAME", STRATEGY_NAME)
-    try:
-        strat = get_strategy(strategy_name)
-    except KeyError:
-        fallback_name = "ma_cross_5_20"
-        if strategy_name != fallback_name:
-            _log_json(
-                logger,
-                logging.WARNING,
-                {
-                    "event": "strategy_missing",
-                    "requested": strategy_name,
-                    "fallback": fallback_name,
-                },
-            )
-        strat = get_strategy(fallback_name)
-        strategy_name = fallback_name
-    strategy_state: Dict[str, Dict[str, Any]] = {}
-    _log_json(
-        logger,
-        logging.INFO,
-        {"event": "strategy_selected", "strategy": strategy_name},
-    )
-
     global b_global, eng_global
     b_global, eng_global = b, eng
     emergency_mgr = EmergencyManager(
@@ -1201,29 +1174,6 @@ def main():
                     can_reenter = eng.can_re_enter_after_stop(symbol)
                     funding_avoid = is_near_funding(_dt.utcnow(), minutes=FUNDING_AVOID_MIN)
 
-                    strategy_ctx = strategy_state.setdefault(symbol, {})
-                    bar_payload = {
-                        "symbol": symbol,
-                        "history": df,
-                        "close": close,
-                        "is_new_bar": is_new_bar,
-                        "atr": atr_abs,
-                    }
-                    try:
-                        signal = strat.on_bar(bar_payload, strategy_ctx)
-                    except Exception as sig_err:
-                        _log_json(
-                            logger,
-                            logging.WARNING,
-                            {
-                                "event": "strategy_signal_error",
-                                "symbol": symbol,
-                                "error": str(sig_err),
-                                "strategy": strategy_name,
-                            },
-                        )
-                        signal = Signal(side="neutral", strength=0.0, meta={"error": str(sig_err)})
-
                     plan = eng.make_entry_plan(
                         symbol=symbol,
                         df=df,
@@ -1235,16 +1185,6 @@ def main():
                         funding_avoid=funding_avoid,
                         daily_loss_hit=daily_loss_hit,
                     )
-                    if isinstance(plan, dict):
-                        plan.setdefault(
-                            "plugin_signal",
-                            {
-                                "strategy": strategy_name,
-                                "side": signal.side,
-                                "strength": signal.strength,
-                                "meta": signal.meta,
-                            },
-                        )
                     # signal log
                     try:
                         sig = plan.get('signal', {})
