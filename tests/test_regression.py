@@ -1,12 +1,15 @@
 import json
+import csv
 import os
 from pathlib import Path
 from typing import Any, Dict, List
+from datetime import datetime, timezone
 
 import pandas as pd
 import pytest
 
-from auto_trading_bot.reporter import generate_report
+from auto_trading_bot.reporter import Reporter, generate_report
+from auto_trading_bot.main import _persist_primary_entry
 from baseline import DEFAULT_BASELINE_PATH, generate_baseline, looks_like_fallback
 
 # Mark all tests in this module as regression (slow)
@@ -170,3 +173,62 @@ def test_report_metrics_regression(
             assert math.isinf(exp) and math.isinf(act), f"Metric {key} mismatch (infinite check)"
         else:
             assert act == pytest.approx(exp, rel=1e-2, abs=1e-2), f"Metric {key} mismatch"
+
+
+
+def test_primary_entry_logging_creates_trade_artifacts(tmp_path):
+    base_dir = tmp_path / "data"
+    fixed_now = datetime(2025, 10, 1, 12, 0, tzinfo=timezone.utc)
+    reporter = Reporter(str(base_dir), "testnet", clock=lambda: fixed_now)
+
+    plan_tags = {
+        "strategy_name": "ma_cross_5_20",
+        "strategy_version": "1",
+        "strategy_params_hash": "hash123",
+        "strategy_params": {"fast": 5, "slow": 20},
+    }
+    plan = {
+        "decision": "ENTER_LONG",
+        "risk_multiplier": 0.75,
+        "signal": {"fast_ma": 114108.92, "slow_ma": 113538.97},
+        "reasons": ["trend_alignment", "candle_safe"],
+        "strategy_tags": plan_tags,
+    }
+
+    _persist_primary_entry(
+        reporter,
+        "BTC/USDT",
+        "long",
+        114000.0,
+        0.219,
+        113200.0,
+        plan,
+        plan_tags,
+        equity=15000.0,
+        atr_abs=600.0,
+        risk_usdt=175.0,
+    )
+
+    env_dir = base_dir / "testnet"
+    trades_files = list(env_dir.glob("trades_*.csv"))
+    assert len(trades_files) == 1
+    with trades_files[0].open("r", encoding="utf-8", newline="") as handle:
+        trade_rows = list(csv.DictReader(handle))
+    assert len(trade_rows) == 1
+    trade_row = trade_rows[0]
+    assert trade_row["symbol"] == "BTC/USDT"
+    assert trade_row["status"] == "OPEN"
+    assert trade_row["stop_basis"] == "atr"
+    assert trade_row["strategy_name"] == plan_tags["strategy_name"]
+    assert pytest.approx(float(trade_row["risk_usdt_planned"]), rel=1e-9) == 175.0
+
+    detail_files = list(env_dir.glob("detailed_entries_*.csv"))
+    assert len(detail_files) == 1
+    with detail_files[0].open("r", encoding="utf-8", newline="") as handle:
+        detail_rows = list(csv.DictReader(handle))
+    assert len(detail_rows) == 1
+    detail_row = detail_rows[0]
+    assert detail_row["strategy_name"] == plan_tags["strategy_name"]
+    assert detail_row["strategy_params_hash"] == plan_tags["strategy_params_hash"]
+    assert "trend_alignment" in detail_row["reasons"]
+    assert pytest.approx(float(detail_row["risk_multiplier"]), rel=1e-9) == 0.75

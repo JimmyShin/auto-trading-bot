@@ -67,6 +67,83 @@ log_filtered_signal = reporter.log_filtered_signal
 log_detailed_entry = reporter.log_detailed_entry
 
 
+def _persist_primary_entry(
+    reporter: "Reporter",
+    symbol: str,
+    side_state: str,
+    entry_price: float,
+    qty: float,
+    stop_price: float,
+    plan: Dict[str, Any],
+    strategy_tags_payload: Optional[Dict[str, Any]],
+    equity: Optional[float],
+    atr_abs: float,
+    risk_usdt: float,
+) -> None:
+    stop_distance = abs(entry_price - stop_price)
+    risk_multiplier_value = plan.get("risk_multiplier", 1.0)
+    if isinstance(risk_multiplier_value, dict):
+        risk_multiplier = float(risk_multiplier_value.get(side_state, 1.0) or 1.0)
+    else:
+        risk_multiplier = float(risk_multiplier_value or 1.0)
+
+    entry_reason_raw = plan.get("decision") or "entry"
+    entry_reason = str(entry_reason_raw).lower()
+
+    strategy_tags_for_entry = plan.get("strategy_tags") or strategy_tags_payload or {}
+    if strategy_tags_for_entry:
+        reporter.apply_strategy_tags(strategy_tags_for_entry)
+
+    reporter.log_trade(
+        symbol,
+        side_state,
+        entry_price,
+        qty,
+        entry_reason,
+        risk_usdt=risk_usdt,
+        timeframe=TF,
+        leverage=LEVERAGE,
+        entry_atr_abs=atr_abs,
+        atr_period=ATR_LEN,
+        stop_basis="atr",
+        stop_k=ATR_STOP_K,
+        fallback_pct=EMERGENCY_STOP_FALLBACK_PCT,
+        stop_distance=stop_distance,
+        risk_usdt_planned=risk_usdt,
+    )
+
+    try:
+        equity_for_entry = float(equity) if equity is not None else 0.0
+    except (TypeError, ValueError):
+        equity_for_entry = 0.0
+
+    signal_payload = plan.get("signal") or {}
+    raw_reasons = plan.get("reasons")
+    if isinstance(raw_reasons, (list, tuple, set)):
+        reasons_list = [str(reason) for reason in raw_reasons]
+    elif raw_reasons in (None, ""):
+        reasons_list = []
+    else:
+        reasons_list = [str(raw_reasons)]
+
+    if strategy_tags_for_entry:
+        reporter.apply_strategy_tags(strategy_tags_for_entry)
+
+    reporter.log_detailed_entry(
+        symbol,
+        side_state,
+        entry_price,
+        qty,
+        stop_price,
+        risk_multiplier,
+        atr_abs,
+        signal_payload,
+        equity_usdt=equity_for_entry,
+        reason=entry_reason,
+        reasons_list=reasons_list,
+    )
+
+
 b_global = None
 eng_global = None
 lock = Lock()
@@ -1436,7 +1513,8 @@ def main():
                         try:
                             order = b.create_market_order_safe(symbol, side_order, qty)
                             eff_qty = float(order.get('amount', qty) or qty)
-                            if side_order == 'buy':
+                            side_state = 'long' if side_order == 'buy' else 'short'
+                            if side_state == 'long':
                                 _replace_stop_only(b, symbol, 'long', stop_price, eff_qty)
                                 risk_usdt = abs(close - stop_price) * eff_qty
                                 eng.update_symbol_state_on_entry(symbol, 'long', close, eff_qty, entry_stop_price=stop_price, risk_usdt=risk_usdt)
@@ -1463,6 +1541,31 @@ def main():
                                     close,
                                     levels,
                                     precision_info,
+                                )
+
+                            try:
+                                _persist_primary_entry(
+                                    reporter,
+                                    symbol,
+                                    side_state,
+                                    close,
+                                    eff_qty,
+                                    stop_price,
+                                    plan,
+                                    strategy_tags_payload,
+                                    eq,
+                                    atr_abs,
+                                    risk_usdt,
+                                )
+                            except Exception as entry_log_exc:
+                                _log_json(
+                                    logger,
+                                    logging.WARNING,
+                                    {
+                                        'event': 'entry_log_failed',
+                                        'symbol': symbol,
+                                        'error': str(entry_log_exc),
+                                    },
                                 )
                             metrics_mgr = get_metrics_manager()
                             if metrics_mgr is not None:
