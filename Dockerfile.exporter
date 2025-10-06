@@ -3,10 +3,9 @@ FROM python:3.11-slim
 WORKDIR /app
 
 COPY scripts/exporter_summary_metrics.py scripts/exporter_summary_metrics.py
-COPY reporting/out reporting/out
 
-# Install minimal dependency set
-RUN pip install --no-cache-dir prometheus-client==0.20.0
+RUN pip install --no-cache-dir prometheus-client==0.20.0 \
+    && mkdir -p /app/reporting/out
 
 ENV ENV=testnet
 ENV SUMMARY_ROOT=/app/reporting/out
