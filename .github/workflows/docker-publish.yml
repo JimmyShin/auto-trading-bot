@@ -74,17 +74,45 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Ensure the remote compose file includes `container_name: auto-trading-bot`
-      # so the container has a stable name (no _1 suffixes). This uploads the repo's
-      # docker-compose.yml to the server before running the deploy script.
-      - name: Upload docker-compose.yml to server
+      - name: Upload deployment manifests
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
-          source: "docker-compose.yml"
+          source: "docker-compose.yml,docker-compose.monitoring.yml,Dockerfile.exporter"
           target: "/opt/auto-trading-bot/"
+          overwrite: true
+
+      - name: Upload monitoring config
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          source: "monitoring"
+          target: "/opt/auto-trading-bot/"
+          overwrite: true
+
+      - name: Upload Grafana assets
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          source: "grafana"
+          target: "/opt/auto-trading-bot/"
+          overwrite: true
+
+      - name: Upload exporter script
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          source: "scripts/exporter_summary_metrics.py"
+          target: "/opt/auto-trading-bot/"
+          overwrite: true
 
       - name: Signal graceful restart intent
         uses: appleboy/ssh-action@v0.1.10
@@ -109,7 +137,7 @@ jobs:
             "$PY_BIN" -c "import json, os; from datetime import datetime, timezone; from pathlib import Path; path = Path(os.environ['RESTART_INTENT_PATH']); mode = os.environ.get('RESTART_INTENT_MODE', 'graceful'); ttl = int(os.environ.get('RESTART_INTENT_TTL', '900')); intent = {'created_at': datetime.now(timezone.utc).isoformat(), 'mode': mode, 'ttl': ttl}; path.parent.mkdir(parents=True, exist_ok=True); path.write_text(json.dumps(intent), encoding='utf-8'); print(json.dumps(intent))"
             ls -l "$RESTART_INTENT_PATH"
 
-      - name: Deploy to droplet via SSH
+      - name: Deploy full monitoring stack via SSH
         uses: appleboy/ssh-action@v0.1.10
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -117,25 +145,17 @@ jobs:
           key: ${{ secrets.DEPLOY_KEY }}
           script: |
             set -euo pipefail
-            # --- Ensure remote can pull private images from GHCR ---
             REGISTRY_USER=$(echo "${{ secrets.GHCR_USER }}" | tr '[:upper:]' '[:lower:]')
             REGISTRY_TOKEN='${{ secrets.GHCR_TOKEN }}'
             echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
 
-            # --- Pre-pull specific commit tag for fast rollback and warm cache ---
-            docker pull ghcr.io/$REGISTRY_USER/auto-trading-bot:${{ github.sha }} || true
-
-            # --- Deploy using existing compose file (kept for backward compatibility) ---
             cd /opt/auto-trading-bot
-            docker stop auto-trading-bot 2>/dev/null || true
-            docker rm auto-trading-bot 2>/dev/null || true
-            docker-compose down
-            docker-compose pull
-            docker-compose up -d
 
-            # --- Post-deploy health check: fail if container not healthy ---
-            # Assumes service/container is named 'auto-trading-bot' in docker-compose.yml
-            echo "Waiting for container health..."
+            docker-compose -f docker-compose.yml -f docker-compose.monitoring.yml down
+            docker-compose -f docker-compose.yml -f docker-compose.monitoring.yml pull bot prometheus grafana
+            docker-compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d bot prometheus grafana summary_exporter
+
+            echo "Waiting for trading bot health..."
             for i in $(seq 1 20); do
               status=$(docker inspect -f '{{.State.Health.Status}}' auto-trading-bot 2>/dev/null || echo none)
               if [ "$status" = "healthy" ]; then
@@ -147,4 +167,5 @@ jobs:
             echo "Container failed to become healthy. Showing recent logs:" >&2
             docker logs --since 2m --tail 200 auto-trading-bot || true
             exit 1
+
 
