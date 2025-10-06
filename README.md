@@ -1,6 +1,6 @@
 # Auto Trading Bot
 
-Modular, testâ€‘driven crypto trading bot with risk management, deterministic signals, rich reporting, and CI/CD + Docker.
+Modular, test?‘driven crypto trading bot with risk management, deterministic signals, rich reporting, and CI/CD + Docker.
 
 ## Overview
 
@@ -9,7 +9,7 @@ Modular, testâ€‘driven crypto trading bot with risk management, deterministic si
   - Strategy module producing deterministic signals for regression testing.
   - Strategy registry defaulting to a 5/20 MA cross plugin (Donchian+ATR stub kept for future reactivation).
   - Risk management for sizing, stops, pyramiding, structural resets, and daily loss limits.
-  - Exchange API wrapper to isolate thirdâ€‘party dependencies.
+  - Exchange API wrapper to isolate third?‘party dependencies.
   - Reporter for logging trades/signals and generating analytics (DataFrame + Excel).
   - CI/CD with pytest on push/PR, Docker build/publish, and optional deploy.
 
@@ -41,7 +41,7 @@ plan = engine.make_entry_plan(
 ### risk.py
 
 - Manager: `class RiskManager(state: dict | None = None)`
-- Responsibilities: daily anchors and loss limit; ATRâ€‘based sizing; trailing stops; pyramiding; structural reset checks; broker sync.
+- Responsibilities: daily anchors and loss limit; ATR?‘based sizing; trailing stops; pyramiding; structural reset checks; broker sync.
 - Key methods:
   - `calc_qty_by_risk(equity_usdt, price, atr_abs, leverage, symbol="") -> float`
   - `calc_qty_by_risk_adjusted(..., risk_pct: float | None = None) -> float`
@@ -67,7 +67,7 @@ equity = ex.get_equity_usdt()
 - Logger: `class Reporter(base_dir: str, environment: str)` with `Reporter.from_config()`.
 - CSV logging: `log_trade`, `log_exit`, `log_signal_analysis`, `log_filtered_signal`, `log_detailed_entry` (files under `data/<env>/`).
 - Analytics:
-  - `generate_report(trades) -> pd.DataFrame` returns a singleâ€‘row DataFrame of metrics (see Reporting).
+  - `generate_report(trades) -> pd.DataFrame` returns a single?‘row DataFrame of metrics (see Reporting).
   - `save_report(df, filepath)` writes Excel with `index=False`.
 - Example:
 ```python
@@ -127,8 +127,8 @@ Common keys:
 
 ### Pytest suite
 
-- Signals equality: regenerated symbolsâ€™ records must match baseline exactly.
-- Metrics comparison: Win Rate, Expectancy, MDD, Profit Factor, Sharpe must match baseline metrics within tolerance (rel/abs = 1eâ€‘2).
+- Signals equality: regenerated symbols??records must match baseline exactly.
+- Metrics comparison: Win Rate, Expectancy, MDD, Profit Factor, Sharpe must match baseline metrics within tolerance (rel/abs = 1e??).
 - Relevant tests:
   - `tests/test_regression.py` (signals exact + metrics approx)
   - `test_baseline_regression.py` (baseline structure)
@@ -157,13 +157,13 @@ python -m pytest -v
 
 ### Extended metrics (generate_report)
 
-- Expectancy = (win_rate*avg(win)) âˆ’ (loss_rate*avg(loss))
-- MDD = max peakâ€‘toâ€‘trough drawdown / peak (ratio)
+- Expectancy = (win_rate*avg(win)) ??(loss_rate*avg(loss))
+- MDD = max peak?‘to?‘trough drawdown / peak (ratio)
 - Profit Factor = gross profit / gross loss
 - Sharpe Ratio = mean(returns) / std(returns) (no annualisation)
 - Win/Loss streaks = max consecutive wins/losses
-- Average holding time = mean(exit_ts âˆ’ entry_ts) in seconds
-- Long/Short performance = perâ€‘side trades, win rate, expectancy, profit factor
+- Average holding time = mean(exit_ts ??entry_ts) in seconds
+- Long/Short performance = per?‘side trades, win rate, expectancy, profit factor
 
 ### Output formats
 
@@ -180,7 +180,7 @@ python -m pytest -v
 
 - Offline baseline decisions: `python baseline.py --symbols BTC/USDT ETH/USDT --timeframe 1h --bars 180 --output data/testnet/baseline.json`
 - Train/test helpers: see `backtest/` (`sim.py`, `run_train_test.py`, `run_from_config.py`, `metrics.py`).
-- Ensure `data/backtest/ohlcv/` exists (offline candles) â€” itâ€™s ignored by git but required for baseline regeneration.
+- Ensure `data/backtest/ohlcv/` exists (offline candles) ??it?™s ignored by git but required for baseline regeneration.
 
 #### Backtesting usage
 
@@ -247,7 +247,7 @@ GHCR publishing (on `main`) and optional remote deploy are configured in `.githu
 - File: `docker-compose.override.yml` (auto-applied by Compose)
 - Adds:
   - Mount for `./data/backtest/ohlcv/`
-  - A `backtest` service (same image) to run adâ€‘hoc backtests inside the container
+  - A `backtest` service (same image) to run ad?‘hoc backtests inside the container
 - Usage:
   ```bash
   # Start bot + backtest shell container
@@ -265,7 +265,7 @@ GHCR publishing (on `main`) and optional remote deploy are configured in `.githu
 - Messages are posted as `{"text": "..."}` to the webhook; failures are logged and never crash the bot.
 
 Setup steps:
-- Create an Incoming Webhook in Slack (App Directory â†’ Incoming Webhooks), select a channel or your personal DM.
+- Create an Incoming Webhook in Slack (App Directory ??Incoming Webhooks), select a channel or your personal DM.
 - Copy the Webhook URL and set it as `SLACK_WEBHOOK_URL`.
 - Example `.env` snippet:
   ```env
@@ -298,7 +298,7 @@ python tools/mcp_server.py
 
 ## Future Extensions
 
-- Strategy diversification (multiâ€‘system, regime switching)
+- Strategy diversification (multi?‘system, regime switching)
 - Advanced risk models (Kelly fraction, Monte Carlo bands)
 - Reporting to Slack/Telegram and dashboards (Grafana/Prometheus)
 - Scaling with cloud/VPS (Docker Compose, k8s, horizontal workers)
@@ -343,6 +343,20 @@ scrape_configs:
     static_configs:
       - targets: ["localhost:9108"]
 ```
+
+### Local monitoring stack
+
+Start Prometheus + Grafana alongside the bot with the provided compose override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d bot prometheus grafana summary_exporter
+```
+
+Prometheus scrapes the bot via `monitoring/prometheus.yml` (`bot:9108` inside the compose network).
+The summary exporter at :9102 streams the latest trade statistics into Prometheus (job `summary_exporter`).
+
+Grafana is provisioned with the trading dashboards in `grafana/dashboards` and a default Prometheus data source at `http://prometheus:9090`.
+Visit `http://localhost:3000` (`admin` / `admin`) to explore the dashboards.
 
 Common metrics:
 - `bot_equity{account}` ? live equity in quote currency

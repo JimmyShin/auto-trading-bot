@@ -52,7 +52,7 @@ def _log_report_metrics(payload: Dict[str, Any]) -> None:
         logger.info("REPORTER_METRICS %s", payload)
 
 
-__all__ = ["Reporter", "generate_report", "save_report", "build_snapshot_payload", "build_weekly_summary", "load_latest_summary", "collect_runtime_metrics", "compile_weekly_summary"]
+__all__ = ["Reporter", "generate_report", "save_report", "build_snapshot_payload", "build_weekly_summary", "load_latest_summary", "collect_runtime_metrics", "compile_weekly_summary", "generate_daily_summary"]
 
 # RAW trades CSV schema version (append-only schema). Bump on column changes.
 SCHEMA_VERSION = 5
@@ -1322,4 +1322,231 @@ def compile_weekly_summary(env: str) -> Dict[str, Any]:
         "trade_count_week": trade_count,
         "positive_days_ratio": _avg(consistency_values),
     }
+
+
+def generate_daily_summary(
+    env: str = "testnet",
+    *,
+    data_dir: Optional[str] = None,
+    reporting_dir: Optional[str] = None,
+    force: bool = False,
+) -> Dict[str, Any]:
+    '''Populate summary stats for the latest trade report output.'''
+
+    data_root = Path(data_dir or os.getenv("DATA_DIR", "data")) / env
+    out_root = Path(reporting_dir or "reporting") / "out" / env
+    summary_path = out_root / "latest-summary.json"
+    if not summary_path.exists():
+        raise FileNotFoundError(f"latest summary not found for env={env} at {summary_path}")
+
+    try:
+        report = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # pragma: no cover - defensive guard
+        raise RuntimeError(f"failed to read latest summary for env={env}: {exc}") from exc
+
+    meta = report.get("meta") or {}
+    stats = report.get("stats") or {}
+
+    existing_total = _safe_number(stats.get("trades_total"))
+    existing_equity = _safe_number(stats.get("equity"))
+    if (
+        existing_total is not None
+        and existing_total > 0
+        and existing_equity is not None
+        and existing_equity > 0
+        and not force
+    ):
+        return report
+
+    source_files: List[str] = []
+    for key in ("source_files",):
+        for src in report.get(key) or []:
+            if src and src not in source_files:
+                source_files.append(src)
+    for src in meta.get("source_files") or []:
+        if src and src not in source_files:
+            source_files.append(src)
+    if not source_files:
+        for candidate in sorted(data_root.glob("trades_*.csv")):
+            if candidate.is_file():
+                source_files.append(str(candidate))
+
+    rows: List[Dict[str, Any]] = []
+    latest_csv = out_root / "latest.csv"
+    if latest_csv.exists():
+        with latest_csv.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            rows.extend(reader)
+    if not rows:
+        for src in source_files:
+            path_obj = Path(src)
+            if not path_obj.is_absolute():
+                path_obj = (Path.cwd() / path_obj).resolve()
+            if not path_obj.exists():
+                continue
+            try:
+                with path_obj.open("r", encoding="utf-8", newline="") as handle:
+                    reader = csv.DictReader(handle)
+                    rows.extend(reader)
+            except Exception:
+                continue
+
+    now_utc = datetime.utcnow().replace(tzinfo=timezone.utc)
+    totals = len(rows)
+    closed = 0
+    wins = 0
+    losses = 0
+    pnls: List[float] = []
+    fees_values: List[float] = []
+    r_atr_values: List[float] = []
+    r_usd_values: List[float] = []
+    returns: List[float] = []
+    durations: List[float] = []
+
+    def _parse_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        if isinstance(value, (int, float)):
+            return float(value) != 0.0
+        text_val = str(value).strip().lower()
+        return text_val in {"1", "true", "yes", "y", "win", "won"}
+
+    def _first_number_from_row(row: Dict[str, Any], columns: Iterable[str]) -> Optional[float]:
+        for col in columns:
+            if col in row:
+                num = _safe_number(row.get(col))
+                if num is not None:
+                    return num
+        return None
+
+    def _parse_iso(ts: Any) -> Optional[datetime]:
+        if not ts:
+            return None
+        text_val = str(ts).strip()
+        if not text_val:
+            return None
+        if text_val.endswith("Z"):
+            text_val = text_val[:-1] + "+00:00"
+        try:
+            return datetime.fromisoformat(text_val)
+        except ValueError:
+            return None
+
+    for row in rows:
+        status = (row.get("status") or "").strip().upper()
+        exit_present = any(row.get(field) for field in ("exit_ts", "exit_ts_utc", "exit_timestamp"))
+        if status == "CLOSED" or exit_present:
+            closed += 1
+
+        pnl_val = _first_number_from_row(row, ("pnl_quote_expost", "pnl_quote", "pnl_usd", "pnl"))
+        if pnl_val is None:
+            pnl_pct = _first_number_from_row(row, ("pnl_pct",))
+            qty_val = _first_number_from_row(row, ("qty",))
+            price_val = _first_number_from_row(row, ("entry_price", "price"))
+            if pnl_pct is not None and qty_val is not None and price_val is not None:
+                scale = 100.0 if abs(pnl_pct) > 1 else 1.0
+                pnl_val = (pnl_pct / scale) * qty_val * price_val
+        if pnl_val is not None:
+            pnls.append(float(pnl_val))
+
+        fee_val = _first_number_from_row(row, ("fees_quote_actual", "fee_quote", "fees"))
+        if fee_val is not None:
+            fees_values.append(float(fee_val))
+
+        r_atr_val = _first_number_from_row(row, ("R_atr_expost", "r_atr_expost", "R_multiple"))
+        if r_atr_val is not None:
+            r_atr_values.append(float(r_atr_val))
+
+        r_usd_val = _first_number_from_row(row, ("R_usd_expost", "r_usd_expost"))
+        if r_usd_val is not None:
+            r_usd_values.append(float(r_usd_val))
+
+        ret_val = _first_number_from_row(row, ("return", "pnl_pct"))
+        if ret_val is not None:
+            returns.append(float(ret_val))
+
+        is_win = _parse_bool(row.get("is_win"))
+        is_loss = _parse_bool(row.get("is_loss"))
+        if not is_win and not is_loss and pnl_val is not None:
+            if pnl_val > 0:
+                is_win = True
+            elif pnl_val < 0:
+                is_loss = True
+        if is_win:
+            wins += 1
+        if is_loss:
+            losses += 1
+
+        duration_val = _first_number_from_row(row, ("duration_sec",))
+        if duration_val is None:
+            entry_dt = _parse_iso(row.get("entry_ts") or row.get("entry_ts_utc") or row.get("timestamp"))
+            exit_dt = _parse_iso(row.get("exit_ts") or row.get("exit_ts_utc") or row.get("exit_timestamp"))
+            if entry_dt and exit_dt:
+                duration_val = (exit_dt - entry_dt).total_seconds()
+        if duration_val is not None:
+            durations.append(float(duration_val))
+
+    pnl_total = sum(pnls)
+    gross_win = sum(val for val in pnls if val > 0)
+    gross_loss = sum(-val for val in pnls if val < 0)
+    profit_factor = gross_win / gross_loss if gross_loss > 0 else None
+
+    win_rate_pct = (wins / closed * 100.0) if closed else 0.0
+    avg_r_atr = sum(r_atr_values) / len(r_atr_values) if r_atr_values else None
+    avg_r_usd = sum(r_usd_values) / len(r_usd_values) if r_usd_values else None
+    avg_return = sum(returns) / len(returns) if returns else None
+    avg_duration = sum(durations) / len(durations) if durations else None
+    fees_total = sum(fees_values)
+
+    baseline_equity = _baseline_equity_for_env(env)
+    equity = None
+    if baseline_equity is not None:
+        equity = baseline_equity + pnl_total
+    elif pnls:
+        equity = pnl_total
+
+    stats_payload: Dict[str, Any] = {
+        "generated_at": now_utc.isoformat().replace("+00:00", "Z"),
+        "trades_total": int(totals),
+        "trades_closed": int(closed),
+        "trades_open": int(max(totals - closed, 0)),
+        "wins": int(wins),
+        "losses": int(losses),
+        "win_rate_pct": round(win_rate_pct, 2) if closed else 0.0,
+        "pnl_total": round(pnl_total, 2) if pnls else 0.0,
+        "gross_win": round(gross_win, 2) if pnls else 0.0,
+        "gross_loss": round(gross_loss, 2) if pnls else 0.0,
+        "profit_factor": round(profit_factor, 3) if profit_factor is not None else None,
+        "avg_r_atr": round(avg_r_atr, 4) if avg_r_atr is not None else None,
+        "avg_r_usd": round(avg_r_usd, 4) if avg_r_usd is not None else None,
+        "avg_return": round(avg_return, 6) if avg_return is not None else None,
+        "fees_total": round(fees_total, 2) if fees_values else 0.0,
+        "avg_fee": round(fees_total / len(fees_values), 4) if fees_values else 0.0,
+        "avg_duration_sec": round(avg_duration, 2) if avg_duration is not None else None,
+        "baseline_equity": baseline_equity,
+        "equity": round(equity, 2) if equity is not None else None,
+    }
+
+    if not pnls:
+        stats_payload.setdefault("pnl_total", 0.0)
+        stats_payload.setdefault("equity", baseline_equity if baseline_equity is not None else 0.0)
+
+    meta.update(
+        {
+            "source_files": source_files,
+            "data_dir": str(data_root),
+            "report_dir": str(out_root),
+            "refreshed_at": stats_payload["generated_at"],
+            "stats_version": 1,
+            "rows": totals,
+        }
+    )
+
+    report["meta"] = meta
+    report["stats"] = stats_payload
+
+    summary_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return report
 

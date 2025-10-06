@@ -1,0 +1,16 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY scripts/exporter_summary_metrics.py scripts/exporter_summary_metrics.py
+COPY reporting/out reporting/out
+
+# Install minimal dependency set
+RUN pip install --no-cache-dir prometheus-client==0.20.0
+
+ENV ENV=testnet
+ENV SUMMARY_ROOT=/app/reporting/out
+ENV EXPORTER_PORT=9102
+ENV EXPORTER_INTERVAL=10
+
+CMD ["python", "scripts/exporter_summary_metrics.py"]
