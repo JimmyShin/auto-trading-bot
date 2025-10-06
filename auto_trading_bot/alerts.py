@@ -30,6 +30,7 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple
 import requests
 
 from auto_trading_bot.metrics import get_metrics_manager, compute_daily_dd_ratio, get_state
+from auto_trading_bot import reporter
 from auto_trading_bot.slack_notifier import SlackNotifier
 from auto_trading_bot.slack_fmt import fmt_optional, fmt_currency, fmt_percent_ratio, fmt_int, fmt_float2, DASH
 from auto_trading_bot.mode import TradingMode
@@ -73,6 +74,9 @@ RUN_ID_LENGTH = 7
 
 
 _EXIT_EQUITY_WARNED = False
+
+
+_SNAPSHOT_THREADS: Dict[str, str] = {}
 
 
 def _safe_number(value: Any) -> Optional[float]:
@@ -158,6 +162,45 @@ def slack_notify_safely(message: str, *, blocks: Optional[List[Dict[str, Any]]] 
     if notifier.send(message, blocks=blocks):
         return True
     return notifier.send(message)
+
+
+def send_to_slack(payload: Dict[str, Any], *, channel: str = "#trading-ops", thread_ts: Optional[str] = None, sender: Optional[Callable[..., bool]] = None) -> bool:
+    sender = sender or slack_notify_safely
+    message_text = (payload or {}).get("text") or ""
+    blocks = (payload or {}).get("blocks")
+    channel_prefix = f"[{channel}] " if channel else ""
+    formatted = CONTEXT.format_text(f"{channel_prefix}{message_text}")
+    if thread_ts:
+        formatted = f"{formatted}\n(thread:{thread_ts})"
+    success = sender(formatted, blocks=blocks)
+    if success:
+        logger.info("Slack notification sent", extra={"event": "snapshot_posted", "channel": channel})
+    else:
+        logger.warning("Slack notification failed", extra={"event": "snapshot_failed", "channel": channel})
+    return success
+
+
+def get_last_snapshot_thread(env: str) -> Optional[str]:
+    return _SNAPSHOT_THREADS.get(env)
+
+
+def send_daily_snapshot(env: str, summary: Dict[str, Any], metrics: Dict[str, Any]) -> None:
+    payload = reporter.build_snapshot_payload(env, summary or {}, metrics or {})
+    thread_hint = metrics.get("thread_ts") or f"{CONTEXT.thread_key('SNAPSHOT')}:{int(time.time())}"
+    if send_to_slack(payload, channel="#trading-ops"):
+        _SNAPSHOT_THREADS[env] = thread_hint
+        logger.info("Daily snapshot dispatched", extra={"event": "daily_snapshot", "env": env})
+    else:
+        logger.warning("Failed to dispatch daily snapshot", extra={"event": "daily_snapshot_failed", "env": env})
+
+
+def send_weekly_summary(env: str, stats: Dict[str, Any]) -> None:
+    payload = reporter.build_weekly_summary(env, stats or {})
+    thread_ts = get_last_snapshot_thread(env)
+    if send_to_slack(payload, channel="#trading-ops", thread_ts=thread_ts):
+        logger.info("Weekly summary dispatched", extra={"event": "weekly_summary", "env": env})
+    else:
+        logger.warning("Failed to dispatch weekly summary", extra={"event": "weekly_summary_failed", "env": env})
 
 
 @dataclass
