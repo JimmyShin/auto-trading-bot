@@ -4,15 +4,22 @@ import json
 import logging
 import os
 import urllib.request
+import importlib
 from typing import Any, Dict, Optional
 
 
 class SlackNotifier:
     """Minimal Slack webhook adapter (dry-run friendly)."""
 
-    def __init__(self, *, logger_name: str = __name__) -> None:
+    def __init__(
+        self,
+        *,
+        logger_name: str = __name__,
+        use_alerts_requests: bool = False,
+    ) -> None:
         self._logger = logging.getLogger(logger_name)
         self._url = os.environ.get("SLACK_WEBHOOK_URL")
+        self._use_alerts_requests = use_alerts_requests
         dry_env = os.environ.get("SLACK_DRY_RUN", "false").strip().lower()
         self._dry = dry_env == "true" or not self._url
 
@@ -20,6 +27,31 @@ class SlackNotifier:
         if self._dry:
             self._logger.info(json.dumps({"type": "SLACK_DRY_RUN", "payload": payload}, sort_keys=True))
             return True
+        if self._use_alerts_requests:
+            try:
+                from auto_trading_bot import alerts as alerts_mod  # type: ignore
+
+                requests_mod = getattr(alerts_mod, "requests", None)
+            except Exception:
+                requests_mod = None
+            if requests_mod is not None:
+                try:
+                    response = requests_mod.post(
+                        self._url,
+                        json=payload,
+                        headers={"Content-Type": "application/json"},
+                        timeout=10,
+                    )
+                    if getattr(response, "status_code", 200) >= 400:
+                        self._logger.warning(
+                            "Slack webhook responded with status %s", getattr(response, "status_code", "unknown")
+                        )
+                        return False
+                    return True
+                except Exception as exc:  # pragma: no cover - network failure surfaces in logs
+                    self._logger.warning("Slack webhook failed: %s", exc)
+                    return False
+
         try:
             data = json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(

@@ -1024,18 +1024,42 @@ def apply_equity_snapshot(account: str, equity: Optional[float], *, now: Optiona
     dd = max(0.0, (peak - equity) / peak)
     dd = min(dd, 1.0)
     return dd
+
 def _value_or_default(value: Optional[float], default: float = 0.0) -> float:
     num = _safe_number(value)
     return num if num is not None else default
 
 
-def _percentage_value(value: Optional[float]) -> float:
+def _percentage_value(value: Optional[float]) -> Optional[float]:
     num = _safe_number(value)
     if num is None:
-        return 0.0
+        return None
     if -1.0 <= num <= 1.0:
         return num * 100.0
     return num
+
+
+def _first_number(*values: Any) -> Optional[float]:
+    for value in values:
+        num = _safe_number(value)
+        if num is not None:
+            return num
+    return None
+
+def _baseline_equity_for_env(env: str) -> Optional[float]:
+    base_dir = os.getenv('DATA_DIR', 'data')
+    candidates = [Path(base_dir) / env / 'baseline.json', Path('data') / env / 'baseline.json']
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            data = json.loads(candidate.read_text(encoding='utf-8'))
+        except Exception:
+            continue
+        value = _first_number(data.get('equity'), data.get('wallet_balance'))
+        if value is not None:
+            return value
+    return None
 
 
 _DAILY_EMOJI = "📊"
@@ -1046,20 +1070,62 @@ _WARN_EMOJI = "⚠️"
 _PLACEHOLDER = "—"
 
 
+def _format_currency(value: Optional[float]) -> str:
+    if value is None or value <= 0:
+        return _PLACEHOLDER
+    return f"${value:,.0f}"
+
+
+def _format_signed_currency(value: Optional[float]) -> str:
+    if value is None:
+        return _PLACEHOLDER
+    return f"${value:+.2f}"
+
+
+def _format_signed_float(value: Optional[float]) -> str:
+    if value is None:
+        return _PLACEHOLDER
+    return f"{value:+.2f}"
+
+
+def _format_percent(value: Optional[float]) -> str:
+    if value is None:
+        return _PLACEHOLDER
+    return f"{value:+.2f}%"
+
+
+def _format_percent_unsigned(value: Optional[float]) -> str:
+    if value is None:
+        return _PLACEHOLDER
+    return f"{value:.1f}%"
+
+
+def _format_int(value: Optional[float]) -> str:
+    if value is None:
+        return _PLACEHOLDER
+    return f"{int(value)}"
+
+
+def _format_delta(value: Optional[float]) -> str:
+    if value is None:
+        return _PLACEHOLDER
+    return f"{int(value):+}"
+
+
 def build_snapshot_payload(env: str, summary: Dict[str, Any], metrics: Dict[str, Any]) -> Dict[str, Any]:
     summary = summary or {}
     metrics = metrics or {}
 
-    equity = _value_or_default(summary.get("equity_usd"))
-    if equity == 0.0:
-        equity = _value_or_default(metrics.get("equity_usd"), _value_or_default(metrics.get("equity")))
-    dd = _percentage_value(summary.get("drawdown_pct"))
-    expectancy = _value_or_default(summary.get("expectancy_usd_30"), _value_or_default(metrics.get("expectancy_usd_30")))
-    winrate = _percentage_value(summary.get("winrate_30"))
-    trades_30 = int(summary.get("trades_30") or 0)
-    new_trades = int(_value_or_default(metrics.get("new_trades")))
-    closed_trades = int(_value_or_default(metrics.get("closed_trades")))
-    exposure = _value_or_default(summary.get("max_exposure_usdt"), _value_or_default(metrics.get("max_exposure_usdt")))
+    equity_val = _first_number(summary.get("equity_usd"), metrics.get("equity_usd"), metrics.get("equity"))
+    dd_val = _percentage_value(summary.get("drawdown_pct"))
+    if dd_val is None:
+        dd_val = _percentage_value(metrics.get("daily_dd"))
+    expectancy_val = _first_number(summary.get("expectancy_usd_30"), metrics.get("expectancy_usd_30"))
+    winrate_val = _percentage_value(summary.get("winrate_30"))
+    trades_30_val = _safe_number(summary.get("trades_30"))
+    trades_delta_val = _safe_number(metrics.get("new_trades"))
+    closed_trades_val = _safe_number(metrics.get("closed_trades"))
+    exposure_val = _first_number(summary.get("max_exposure_usdt"), metrics.get("max_exposure_usdt"))
     top_dd = summary.get("top_dd_symbol") or metrics.get("top_dd_symbol") or _PLACEHOLDER
 
     health_flags = metrics.get("health_flags") or {"metrics": True, "reporter": True, "exchange": True}
@@ -1068,14 +1134,22 @@ def build_snapshot_payload(env: str, summary: Dict[str, Any], metrics: Dict[str,
 
     run_id = metrics.get("run_id") or os.getenv("OBS_RUN_ID") or os.getenv("RUN_ID") or "unknown"
 
+    equity_text = _format_currency(equity_val)
+    dd_text = _format_percent(dd_val)
+    expectancy_text = _format_signed_currency(expectancy_val)
+    winrate_text = _format_percent_unsigned(winrate_val)
+    trades_text = _format_int(trades_30_val)
+    trades_delta_text = _format_delta(trades_delta_val)
+    closed_text = _format_int(closed_trades_val)
+    exposure_text = _format_currency(exposure_val)
+
     text = (
         f"{_DAILY_EMOJI} *Daily Equity Snapshot — {env}*\n\n"
-        f"*Equity:* ${equity:,.0f}   *DD:* {dd:+.2f}%\n"
-        f"*Expectancy(30):* ${expectancy:+.2f}   *Winrate(30):* {winrate:.1f}%\n"
-        f"*Trades:* {trades_30} (Δ {new_trades:+})   *Closed:* {closed_trades}\n"
-        f"*Top DD:* {top_dd}   *Exposure:* ${exposure:,.0f}\n"
-        f"{health_emoji} *Health:* metrics={health_flags.get('metrics', True)} "
-        f"reporter={health_flags.get('reporter', True)} exch={health_flags.get('exchange', True)}\n"
+        f"*Equity:* {equity_text}   *DD:* {dd_text}\n"
+        f"*Expectancy(30):* {expectancy_text}   *Winrate(30):* {winrate_text}\n"
+        f"*Trades:* {trades_text} (Δ {trades_delta_text})   *Closed:* {closed_text}\n"
+        f"*Top DD:* {top_dd}   *Exposure:* {exposure_text}\n"
+        f"{health_emoji} *Health:* metrics={health_flags.get('metrics', True)} reporter={health_flags.get('reporter', True)} exch={health_flags.get('exchange', True)}\n"
         f"_run: {run_id}_"
     )
 
@@ -1084,25 +1158,24 @@ def build_snapshot_payload(env: str, summary: Dict[str, Any], metrics: Dict[str,
 
 def build_weekly_summary(env: str, weekly_stats: Dict[str, Any]) -> Dict[str, Any]:
     weekly_stats = weekly_stats or {}
-    total_pnl = _value_or_default(weekly_stats.get("total_pnl_usd"))
+    total_pnl = _first_number(weekly_stats.get("total_pnl_usd"))
     winrate = _percentage_value(weekly_stats.get("winrate_week"))
-    avg_r = _value_or_default(weekly_stats.get("avg_r_week"))
+    avg_r = _first_number(weekly_stats.get("avg_r_week"))
     dd = _percentage_value(weekly_stats.get("max_dd_pct"))
-    expectancy = _value_or_default(weekly_stats.get("expectancy_usd_week"))
-    trade_count = int(_value_or_default(weekly_stats.get("trade_count_week")))
+    expectancy = _first_number(weekly_stats.get("expectancy_usd_week"))
+    trade_count = _first_number(weekly_stats.get("trade_count_week"))
     consistency = _percentage_value(weekly_stats.get("positive_days_ratio"))
 
-    trend_emoji = _TREND_UP_EMOJI if total_pnl >= 0 else _TREND_DOWN_EMOJI
-    health_emoji = _CHECK_EMOJI if dd >= -10 else _WARN_EMOJI
+    trend_emoji = _TREND_UP_EMOJI if (total_pnl or 0) >= 0 else _TREND_DOWN_EMOJI
+    health_emoji = _CHECK_EMOJI if (dd or 0) >= -10 else _WARN_EMOJI
 
     text = (
         f"{trend_emoji} *Weekly Summary — {env}*\n\n"
-        f"*PnL:* ${total_pnl:+.2f}   *Expectancy:* ${expectancy:+.2f}\n"
-        f"*Winrate:* {winrate:.1f}%   *Avg R:* {avg_r:+.2f}\n"
-        f"*Max DD:* {dd:+.2f}%   *Consistency:* {consistency:.1f}%\n"
-        f"{health_emoji} _{trade_count} trades this week_"
+        f"*PnL:* {_format_signed_currency(total_pnl)}   *Expectancy:* {_format_signed_currency(expectancy)}\n"
+        f"*Winrate:* {_format_percent_unsigned(winrate)}   *Avg R:* {_format_signed_float(avg_r)}\n"
+        f"*Max DD:* {_format_percent(dd)}   *Consistency:* {_format_percent_unsigned(consistency)}\n"
+        f"{health_emoji} _{_format_int(trade_count)} trades this week_"
     )
-
     return {"text": text}
 
 
@@ -1123,16 +1196,22 @@ def load_latest_summary(env: str) -> Dict[str, Any]:
 
     summary: Dict[str, Any] = {
         "raw_summary": data,
-        "equity_usd": _value_or_default(data.get("equity_usd")),
+        "equity_usd": _first_number(data.get("equity_usd")),
         "drawdown_pct": _percentage_value(drawdown.get("max_drawdown_pct")),
-        "expectancy_usd_30": _value_or_default(rolling_30.get("expectancy_usd")),
+        "expectancy_usd_30": _first_number(rolling_30.get("expectancy_usd")),
         "winrate_30": _percentage_value(rolling_30.get("win_rate")),
-        "trades_30": int(_value_or_default(rolling_30.get("n"))),
-        "max_exposure_usdt": _value_or_default(data.get("max_exposure_usdt")),
+        "trades_30": _first_number(rolling_30.get("n")) or 0,
+        "max_exposure_usdt": _first_number(data.get("max_exposure_usdt")),
         "top_dd_symbol": drawdown.get("worst_symbol") or drawdown.get("max_drawdown_symbol"),
-        "sum_pnl": _value_or_default((data.get("overall") or {}).get("sum_pnl")),
-        "avg_r_30": _value_or_default(rolling_30.get("avg_r_atr")),
+        "sum_pnl": _first_number((data.get("overall") or {}).get("sum_pnl")),
+        "avg_r_30": _first_number(rolling_30.get("avg_r_atr")),
     }
+    equity_val = summary.get('equity_usd')
+    sum_pnl_val = summary.get('sum_pnl')
+    if (equity_val is None or equity_val <= 0) and sum_pnl_val is not None:
+        baseline = _baseline_equity_for_env(env)
+        if baseline is not None:
+            summary['equity_usd'] = baseline + sum_pnl_val
     return summary
 
 
@@ -1151,23 +1230,27 @@ def collect_runtime_metrics(env: str) -> Dict[str, Any]:
         except Exception as exc:
             logger.warning("Failed to obtain metrics snapshot: %s", exc)
 
-    equity = _value_or_default(snapshot.get("equity"))
-    health_flags = {
-        "metrics": manager is not None,
-        "reporter": bool((Path("reporting") / "out" / env / "latest-summary.json").exists()),
-        "exchange": True,
-    }
+    equity = _first_number(snapshot.get("equity"))
+    new_trades = _first_number(snapshot.get("trades_delta"))
+    closed_trades = _first_number(snapshot.get("window_trades"))
+    expectancy = _first_number(snapshot.get("expectancy_usd_30"))
+    exposure = _first_number(snapshot.get("exposure"))
+
     metrics.update(
         {
             "equity": equity,
             "equity_usd": equity,
             "daily_dd": _percentage_value(snapshot.get("daily_dd")),
-            "new_trades": int(_value_or_default(snapshot.get("trades_delta"))),
-            "closed_trades": int(_value_or_default(snapshot.get("window_trades"))),
+            "new_trades": new_trades,
+            "closed_trades": closed_trades,
             "run_id": os.getenv("OBS_RUN_ID") or os.getenv("RUN_ID") or "unknown",
-            "max_exposure_usdt": _value_or_default(snapshot.get("exposure")),
-            "health_flags": health_flags,
-            "expectancy_usd_30": _value_or_default(snapshot.get("expectancy_usd_30")),
+            "max_exposure_usdt": exposure,
+            "health_flags": {
+                "metrics": manager is not None,
+                "reporter": bool((Path("reporting") / "out" / env / "latest-summary.json").exists()),
+                "exchange": snapshot.get("time_drift") is not None,
+            },
+            "expectancy_usd_30": expectancy,
             "raw_snapshot": snapshot,
         }
     )
@@ -1191,8 +1274,8 @@ def compile_weekly_summary(env: str) -> Dict[str, Any]:
     dd_values: List[float] = []
     consistency_values: List[float] = []
 
-    for path in sorted(root.glob("*-summary.json")):
-        name = path.name
+    for path_summary in sorted(root.glob("*-summary.json")):
+        name = path_summary.name
         if name.startswith("latest"):
             continue
         try:
@@ -1202,7 +1285,7 @@ def compile_weekly_summary(env: str) -> Dict[str, Any]:
         if stamp < cutoff:
             continue
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path_summary.read_text(encoding="utf-8"))
         except Exception:
             continue
         overall = data.get("overall") or {}
@@ -1210,25 +1293,25 @@ def compile_weekly_summary(env: str) -> Dict[str, Any]:
         drawdown = data.get("drawdown") or {}
 
         total_pnl += _value_or_default(overall.get("sum_pnl"))
-        winrates.append(_percentage_value(overall.get("win_rate")))
+        winrates.append(_percentage_value(overall.get("win_rate")) or 0.0)
         avg_rs.append(_value_or_default(rolling.get("avg_r_atr")))
         expectancies.append(_value_or_default(rolling.get("expectancy_usd")))
         trade_count += int(_value_or_default(data.get("trade_count"))) or int(_value_or_default(rolling.get("n")))
-        dd_values.append(_percentage_value(drawdown.get("max_drawdown_pct")))
-        consistency_values.append(_percentage_value((data.get("consistency") or {}).get("positive_days_ratio")))
+        dd_values.append(_percentage_value(drawdown.get("max_drawdown_pct")) or 0.0)
+        consistency_values.append(_percentage_value((data.get("consistency") or {}).get("positive_days_ratio")) or 0.0)
 
     def _avg(values: List[float]) -> float:
         return sum(values) / len(values) if values else 0.0
 
-    if not trade_count and not total_pnl:
+    if trade_count == 0 and total_pnl == 0.0:
         summary = load_latest_summary(env)
         if summary:
             total_pnl = summary.get("sum_pnl", 0.0)
-            winrates.append(_percentage_value(summary.get("winrate_30")))
+            winrates.append(_percentage_value(summary.get("winrate_30")) or 0.0)
             avg_rs.append(_value_or_default(summary.get("avg_r_30")))
             expectancies.append(_value_or_default(summary.get("expectancy_usd_30")))
             trade_count = summary.get("trades_30", 0)
-            dd_values.append(_percentage_value(summary.get("drawdown_pct")))
+            dd_values.append(_percentage_value(summary.get("drawdown_pct")) or 0.0)
 
     return {
         "total_pnl_usd": total_pnl,
@@ -1239,3 +1322,4 @@ def compile_weekly_summary(env: str) -> Dict[str, Any]:
         "trade_count_week": trade_count,
         "positive_days_ratio": _avg(consistency_values),
     }
+

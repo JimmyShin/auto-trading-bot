@@ -983,7 +983,9 @@ def main():
     account_label = str(OBSERVABILITY.get("account_label", "live"))
     metrics_mgr = start_metrics_server(metrics_port, account_label)
     metrics_mgr.set_heartbeat()
-    start_alert_scheduler(OBSERVABILITY, metrics_mgr)
+    _obs_cfg = dict(OBSERVABILITY)
+    _obs_cfg.setdefault("enable_legacy_heartbeat", False)
+    start_alert_scheduler(_obs_cfg, metrics_mgr)
 
     b = ExchangeAPI()
     b.connect()
@@ -1076,7 +1078,6 @@ def main():
         metrics_mgr.set_equity(last_equity)
         reporter.apply_equity_snapshot(snap, now_utc=snap.ts_utc)
         alerts.evaluate(equity=snap.margin_balance, peak_equity=None, now_utc=snap.ts_utc)
-        alerts.maybe_emit_heartbeat(now_utc=snap.ts_utc)
         logger.info("Startup equity snapshot margin=%.2f", last_equity)
     except BalanceAuthError as auth_err:
         logger.error('Startup balance auth error: %s', auth_err)
@@ -1130,9 +1131,7 @@ def main():
                 last_equity = eq
                 eng.reset_daily_anchor(eq)
                 alerts.evaluate(equity=eq, peak_equity=None, now_utc=snap.ts_utc)
-                alerts.maybe_emit_heartbeat(now_utc=snap.ts_utc)
             except BalanceAuthError as auth_err:
-                logger.error('Balance auth error: %s', auth_err)
                 _log_json(
                     logger,
                     logging.ERROR,

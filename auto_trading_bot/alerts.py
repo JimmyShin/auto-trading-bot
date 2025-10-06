@@ -40,6 +40,7 @@ from auto_trading_bot.state_store import StateStore
 logger = logging.getLogger(__name__)
 
 _DEBUG_VALUES = {"1", "true", "yes", "on"}
+_HEARTBEAT_OK = "\u2705"
 _ALERT_SOURCE = "alerts"
 
 def _debug_enabled() -> bool:
@@ -142,7 +143,7 @@ _SLACK: Optional[SlackNotifier] = None  # lazy singleton
 def _get_notifier() -> SlackNotifier:
     global _SLACK
     if _SLACK is None:
-        _SLACK = SlackNotifier()
+        _SLACK = SlackNotifier(use_alerts_requests=True)
     return _SLACK
 
 
@@ -156,12 +157,26 @@ def _send_with_blocks(sender: Callable[..., bool], text: str, blocks: Optional[L
 
 
 def slack_notify_safely(message: str, *, blocks: Optional[List[Dict[str, Any]]] = None) -> bool:
-    notifier = _get_notifier()
-    if not blocks:
-        return notifier.send(message)
-    if notifier.send(message, blocks=blocks):
+    payload: Dict[str, Any] = {"text": message}
+    if blocks:
+        payload["blocks"] = blocks
+    if not payload.get("text"):
         return True
-    return notifier.send(message)
+    try:
+        response = requests.post(
+            os.environ.get("SLACK_WEBHOOK_URL"),
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+        status = getattr(response, "status_code", None)
+        if status is None or not (200 <= status < 300):
+            logger.warning("Slack webhook failed: status=%s", status)
+            return False
+        return True
+    except Exception as exc:
+        logger.warning("Slack webhook exception: %s", exc)
+        return False
 
 
 def send_to_slack(payload: Dict[str, Any], *, channel: str = "#trading-ops", thread_ts: Optional[str] = None, sender: Optional[Callable[..., bool]] = None) -> bool:
@@ -756,6 +771,10 @@ class AlertScheduler(threading.Thread):
         return signals_delta, trades_delta
 
     def _send_heartbeat_if_needed(self, now: float, snap: Dict[str, Any]) -> None:
+        if not bool(self.config.get("enable_legacy_heartbeat", True)):
+            self.last_heartbeat_sent = now
+            return
+
         interval = float(self.config.get("heartbeat_interval_sec", 43200))
         if interval <= 0:
             return
@@ -790,15 +809,16 @@ class AlertScheduler(threading.Thread):
             except (TypeError, ValueError):
                 trade_total_val = None
 
+        signals_delta, trades_delta_window = self._signal_trade_delta()
+        signals_val = _safe_number(signals_delta)
+        trades_window_val = _safe_number(trades_delta_window)
+
         drift_val = (snap.get("time_drift") or {}).get("exchange")
         drift_text = fmt_optional(_safe_number(drift_val), fmt_int)
 
         ts_value = snap.get("heartbeat_ts") or now
         ts_text = fmt_int(ts_value)
 
-        signals_delta, trades_delta_window = self._signal_trade_delta()
-        signals_val = _safe_number(signals_delta)
-        trades_window_val = _safe_number(trades_delta_window)
         dd_val = _safe_number(snap.get("daily_dd"))
 
         _log_alert_payload(
@@ -810,6 +830,8 @@ class AlertScheduler(threading.Thread):
 
         mode_label = config.get_trading_mode()
         body_lines = [
+            f"acct:{mode_label}",
+            f"run:{CONTEXT.run_id}",
             "Equity",
             equity_text,
             "Daily DD",
@@ -822,25 +844,34 @@ class AlertScheduler(threading.Thread):
             fmt_optional(signals_val, fmt_int),
             "Window trades",
             fmt_optional(trades_window_val, fmt_int),
-            f"run:{CONTEXT.run_id} acct:{mode_label} thread:{CONTEXT.thread_key('HB')}",
+            "Heartbeat ts",
+            ts_text,
+            "Drift",
+            drift_text,
         ]
         message_body = "\n".join(body_lines)
-
-        formatted = CONTEXT.format_text(f"HB ✅\n{message_body}")
+        formatted = CONTEXT.format_text(f"HB {_HEARTBEAT_OK}\n{message_body}")
         blocks: List[Dict[str, Any]] = [
             {
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": message_body},
-            }
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"run:{CONTEXT.run_id} acct:{mode_label} thread:{CONTEXT.thread_key('HB')}",
+                    },
+                ],
+            },
         ]
-
-        if _send_with_blocks(self.slack, formatted, blocks=blocks):
+        if self.slack(formatted, blocks=blocks):
             self.last_heartbeat_sent = now
             if trade_total_val is not None:
                 self.last_heartbeat_trades = trade_total_val
-        elif trade_total_val is not None:
-            self.last_heartbeat_trades = trade_total_val
-
+        else:
+            logger.warning("Heartbeat slack send failed", extra={"event": "heartbeat_failed"})
     def reset_emergency_state(self) -> None:
         self.emergencies.clear()
     def _reset_emergency(self, event_type: str) -> None:
