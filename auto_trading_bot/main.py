@@ -88,7 +88,7 @@ def _persist_primary_entry(
         risk_multiplier = float(risk_multiplier_value or 1.0)
 
     entry_reason_raw = plan.get("decision") or "entry"
-    entry_reason = str(entry_reason_raw).lower()
+    entry_reason = str(entry_reason_raw).upper()
 
     strategy_tags_for_entry = plan.get("strategy_tags") or strategy_tags_payload or {}
     if strategy_tags_for_entry:

@@ -587,7 +587,9 @@ def build_report(df: pd.DataFrame, env: str, windows: Sequence[int], min_trades:
 
 
 def write_outputs(report: Dict[str, Any], df: pd.DataFrame, env: str, out_dir: Path) -> Dict[str, Path]:
-    out_root = out_dir / env
+    out_root = out_dir
+    if out_root.name != env:
+        out_root = out_root / env
     out_root.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
@@ -607,12 +609,14 @@ def write_outputs(report: Dict[str, Any], df: pd.DataFrame, env: str, out_dir: P
 
     markdown = _render_markdown(report)
     markdown_path.write_text(markdown, encoding="utf-8")
-    (out_root / "latest-summary.md").write_text(markdown, encoding="utf-8")
+    latest_markdown = out_root / "latest-summary.md"
+    latest_markdown.write_text(markdown, encoding="utf-8")
 
     return {
         "json": json_path,
         "latest_json": latest_summary,
         "markdown": markdown_path,
+        "latest_md": latest_markdown,
         "csv": csv_path,
     }
 
