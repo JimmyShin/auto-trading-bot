@@ -1021,16 +1021,53 @@ class AlertScheduler(threading.Thread):
             self._reset_emergency("no_trade")
             return
         hours = max(1, int(window / 3600))
-        message = (
-            f"⚠️ Signals: {int(signals_delta)} in {hours}h but 0 trades. "
-            f"Check filters/routing. run:{CONTEXT.run_id} acct:{CONTEXT.account_label}"
-        )
-        fields = [
-            {"type": "mrkdwn", "text": f"*Signals*\n{int(signals_delta)}"},
-            {"type": "mrkdwn", "text": f"*Trades*\n{_format_int(trades_delta, fallback='0')}"},
-            {"type": "mrkdwn", "text": f"*Window*\n{hours} h"},
+        severity = float(signals_delta or 0.0)
+
+        key = f"no_trade:{CONTEXT.account_label}"
+        state = self.emergencies.setdefault(key, EmergencyState())
+        if state.fail_count == 0:
+            state.first_fail_ts = now
+        state.fail_count += 1
+
+        if state.fail_count < 3:
+            return
+        if state.first_fail_ts is None or now - state.first_fail_ts < EMERGENCY_MIN_WINDOW_SEC:
+            return
+
+        cooldown = float(self.config.get("alert_cooldown_sec", 600))
+        within_cooldown = state.last_alert_ts is not None and (now - state.last_alert_ts) < cooldown
+        severity_escalated = state.last_alert_severity is not None and severity > state.last_alert_severity
+        if within_cooldown and not severity_escalated:
+            return
+
+        env_label = CONTEXT.account_label or CONTEXT.server_env or "local"
+        causes = [
+            "Entry filter rejected recent signals (e.g., volatility below threshold)",
+            "Cooldown active after prior stop-out",
+            "Insufficient margin or exchange order rejection",
         ]
-        self._handle_emergency("no_trade", severity=signals_delta or 0.0, now=now, message=message, fields=fields, snapshot=self.metrics.get_snapshot() if self.metrics else {})
+        reporter.log_no_trade_event(
+            env_label,
+            run_id=CONTEXT.run_id,
+            account=CONTEXT.account_label,
+            window_sec=window,
+            signals=float(signals_delta or 0.0),
+            trades=None if trades_delta is None else float(trades_delta),
+            causes=causes,
+        )
+        logger.info(
+            "no_trade_event recorded env=%s signals=%s trades=%s window_sec=%s",
+            env_label,
+            signals_delta,
+            trades_delta,
+            window,
+        )
+
+        state.last_alert_ts = now
+        state.last_alert_severity = severity
+        state.fail_count = 0
+        state.first_fail_ts = None
+        self.cooldowns[key] = now
 
     def _check_auto_testnet(self, now: float, snap: Dict[str, Any]) -> None:
         state = get_state()

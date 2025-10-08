@@ -52,7 +52,7 @@ def _log_report_metrics(payload: Dict[str, Any]) -> None:
         logger.info("REPORTER_METRICS %s", payload)
 
 
-__all__ = ["Reporter", "generate_report", "save_report", "build_snapshot_payload", "build_weekly_summary", "load_latest_summary", "collect_runtime_metrics", "compile_weekly_summary", "generate_daily_summary"]
+__all__ = ["Reporter", "generate_report", "save_report", "build_snapshot_payload", "build_weekly_summary", "load_latest_summary", "collect_runtime_metrics", "compile_weekly_summary", "generate_daily_summary", "log_no_trade_event"]
 
 # RAW trades CSV schema version (append-only schema). Bump on column changes.
 SCHEMA_VERSION = 5
@@ -739,6 +739,57 @@ class Reporter:
             self._pending_strategy_tags = None
         except Exception as exc:
             print(f"[WARN] detailed entry log failed: {exc}")
+
+
+
+
+def log_no_trade_event(
+    env: str,
+    *,
+    run_id: str,
+    account: str,
+    window_sec: float,
+    signals: float,
+    trades: float | None,
+    causes: Iterable[str],
+    timestamp: Optional[datetime] = None,
+) -> None:
+    """Append a no-trade anomaly record for daily reporting."""
+    ts = timestamp
+    if ts is None:
+        ts = datetime.utcnow().replace(tzinfo=timezone.utc)
+    iso_ts = ts.isoformat().replace("+00:00", "Z")
+
+    base = Path("reporting") / "out" / env
+    base.mkdir(parents=True, exist_ok=True)
+    path = base / "no_trade_events.csv"
+
+    fieldnames = [
+        "timestamp",
+        "run_id",
+        "account",
+        "window_sec",
+        "signals",
+        "trades",
+        "causes",
+    ]
+
+    record = {
+        "timestamp": iso_ts,
+        "run_id": run_id,
+        "account": account,
+        "window_sec": float(window_sec),
+        "signals": float(signals),
+        "trades": "" if trades is None else float(trades),
+        "causes": " | ".join(str(cause) for cause in causes),
+    }
+
+    file_exists = path.exists()
+    with path.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        if not file_exists or handle.tell() == 0:
+            writer.writeheader()
+        writer.writerow(record)
 
 
 # ------------------------------------------------------------------
